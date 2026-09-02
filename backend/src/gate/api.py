@@ -907,6 +907,7 @@ def main() -> None:
         create_app(settings),
         host=settings.api.listen,
         port=settings.api.port,
+        timeout_graceful_shutdown=5,
     )
 
 
