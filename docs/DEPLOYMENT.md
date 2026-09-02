@@ -1,8 +1,9 @@
 # Gate 完整部署与卸载教程
 
-本文适用于从 Windows 开发机通过 SSH，把 Gate 部署到一台新的 Debian VPS。默认方案只让
-WebUI 和 SOCKS5 监听 `127.0.0.1`，通过 SSH 本地转发使用；Cloudflare Tunnel 仅用于 WebUI，
-不能代替 SOCKS5 的 SSH 转发。
+本文适用于把 GitHub 已编译的 Gate Release 直接安装到 Debian VPS。构建、测试、前端打包和
+Python 依赖下载均由 GitHub Actions 完成；VPS 不需要安装 Git、Node.js、npm、编译器，也不需要
+访问 PyPI。默认方案只让 WebUI 和 SOCKS5 监听 `127.0.0.1`，通过 SSH 本地转发使用；
+Cloudflare Tunnel 仅用于 WebUI，不能代替 SOCKS5 的 SSH 转发。
 
 ## 1. 支持范围与资源
 
@@ -11,53 +12,46 @@ WebUI 和 SOCKS5 监听 `127.0.0.1`，通过 SSH 本地转发使用；Cloudflare
 - Debian 13，`x86_64` 架构；当前 bootstrap 不支持 Debian 12 或 ARM。
 - 可使用 `root` SSH 登录并运行 systemd。
 - 至少 1 vCPU、1 GiB 内存和 2 GiB 可用磁盘；建议 2 vCPU、2 GiB 内存。
-- 能访问 GitHub、PyPI、npm、VPN Gate 和 sing-box 发布地址。
+- 能访问 Debian 软件源、GitHub 和 VPN Gate。
 - 云防火墙只需放行 SSH。不要公开 `11081-11109` 或 `18080`。
 
-Gate 会安装 OpenVPN、HAProxy、nftables、iptables、Python、sing-box 等依赖。五个活动入口通常
-占用 300-600 MiB 内存；每次 A/B 切换会临时增加约 50-100 MiB。
+Gate 安装器会自动安装 OpenVPN、HAProxy、nftables、iptables、Python 3.13、sing-box 等运行时
+依赖。五个活动入口通常占用 300-600 MiB 内存；每次 A/B 切换会临时增加约 50-100 MiB。
 
-## 2. 准备 Windows 开发机
+## 2. VPS 前置检查
 
-安装 Git、Node.js 20.19 或更新版本、Python 3.13 和 OpenSSH Client。克隆项目：
-
-```powershell
-git clone https://github.com/ClaraCora/gate.git
-Set-Location .\gate
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
-npm --prefix frontend ci
-.\scripts\test.ps1
-```
-
-在 `C:\Users\<用户名>\.ssh\config` 中为新 VPS 添加别名：
-
-```sshconfig
-Host Gate-VPS
-    HostName 203.0.113.10
-    User root
-    Port 22
-    IdentityFile C:/Users/<用户名>/.ssh/id_ed25519
-```
-
-将 `HostName`、端口和密钥路径替换为实际值，然后检查系统：
+通过 SSH 登录 VPS：
 
 ```powershell
-ssh Gate-VPS "id -u; . /etc/os-release; echo `$PRETTY_NAME; uname -m"
+ssh Gate-VPS
 ```
 
-第一行必须是 `0`，架构必须是 `x86_64`。部署脚本不会把私钥、管理员密码或会话密钥写入仓库。
+在 VPS 中检查系统；以下命令都以 root 执行：
+
+```sh
+id -u
+. /etc/os-release
+printf '%s\n' "$PRETTY_NAME"
+uname -m
+command -v curl
+```
+
+第一行必须是 `0`，系统必须是 Debian 13，架构必须是 `x86_64`。若最小系统没有 `curl`，先执行
+`apt-get update && apt-get install -y ca-certificates curl`；这是下载安装包所需的唯一前置工具。
 
 ## 3. 首次部署
 
-在项目根目录执行：
+在 VPS 中直接下载 GitHub Release 自带的安装器并执行：
 
-```powershell
-.\scripts\deploy.ps1 -HostAlias Gate-VPS -Bootstrap
+```sh
+curl -fL https://github.com/ClaraCora/gate/releases/latest/download/gate-install.sh \
+  -o /tmp/gate-install.sh
+sh /tmp/gate-install.sh
 ```
 
-`-Bootstrap` 会安装系统依赖并创建 `gate` 服务用户；发布阶段会构建前端、创建 Python 虚拟环境、
-安装 systemd 服务、生成 HAProxy 配置并启动 Gate。首次成功时终端只显示一次：
+安装器依次完成以下工作：下载 `gate-linux-amd64.tar.gz` 及校验文件、验证 SHA-256、安装系统运行
+依赖、从包内 wheelhouse 离线创建 Python 虚拟环境、安装 systemd 服务、生成 HAProxy 配置并启动
+Gate。首次成功时终端只显示一次：
 
 ```text
 Gate WebUI initial admin password: <随机密码>
@@ -65,12 +59,12 @@ Gate WebUI initial admin password: <随机密码>
 
 立即把随机密码保存到密码管理器。VPS 上只保存 Argon2 散列，不保存这段明文。
 
-检查服务和回环监听：
+仍在 VPS 中检查服务和回环监听：
 
-```powershell
-ssh Gate-VPS "systemctl is-active gate-firewall haproxy gate-worker gate-api"
-ssh Gate-VPS "curl --fail --silent http://127.0.0.1:18080/api/v1/health/ready"
-ssh Gate-VPS "ss -lntp | grep -E ':(18080|11081|11082|11083|11084|11085)[[:space:]]'"
+```sh
+systemctl is-active gate-firewall haproxy gate-worker gate-api
+curl --fail --silent http://127.0.0.1:18080/api/v1/health/ready
+ss -lntp | grep -E ':(18080|11081|11082|11083|11084|11085)[[:space:]]'
 ```
 
 就绪接口应返回 `{"status":"ok"}`。所有 Gate 端口都应监听 `127.0.0.1`；发现 `0.0.0.0`
@@ -166,16 +160,26 @@ ssh Gate-VPS "cp -a /etc/gate/config.yaml /etc/gate/config.yaml.before-edit"
 ssh Gate-VPS "set -eu; temp=/etc/haproxy/.gate-manual.cfg; /opt/gate/current/.venv/bin/gate-render-haproxy --config /etc/gate/config.yaml --output `$temp; haproxy -c -f `$temp; install -o root -g root -m 0644 `$temp /etc/haproxy/haproxy.cfg; rm -f `$temp; systemctl reload-or-restart haproxy; systemctl restart gate-worker gate-api"
 ```
 
-## 7. 更新与回滚
+## 7. 更新、固定版本与回滚
 
-拉取代码并发布新版本：
+更新到 GitHub 上的最新稳定 Release：
 
-```powershell
-git pull --ff-only
-.\scripts\deploy.ps1 -HostAlias Gate-VPS
+```sh
+curl -fL https://github.com/ClaraCora/gate/releases/latest/download/gate-install.sh \
+  -o /tmp/gate-install.sh
+sh /tmp/gate-install.sh
 ```
 
-脚本会先运行检查，原子切换 `/opt/gate/current`，失败时恢复上一 release。查看可回滚版本：
+安装指定版本时，安装器和目标资产使用同一个 tag：
+
+```sh
+curl -fL https://github.com/ClaraCora/gate/releases/download/v0.1.1/gate-install.sh \
+  -o /tmp/gate-install.sh
+sh /tmp/gate-install.sh --version v0.1.1
+```
+
+重复安装当前版本是幂等操作；新版本会原子切换 `/opt/gate/current`，就绪检查失败时自动恢复上一
+版本。安装期间保留现有 `/etc/gate`、数据库和管理密码。查看可回滚版本：
 
 ```powershell
 ssh Gate-VPS "readlink -f /opt/gate/current; find /opt/gate/releases -mindepth 1 -maxdepth 1 -type d -printf '%TY-%Tm-%Td %TH:%TM %p\n' | sort -r"
@@ -254,13 +258,30 @@ ssh Gate-VPS "systemctl status gate-api gate-worker gate-firewall --no-pager || 
 卸载脚本不会删除 OpenVPN、HAProxy、nftables、Python 或 sing-box 软件包，因为它们可能被 VPS
 上的其他服务使用。确定这台 VPS 没有其他用途时，再由管理员单独审查并卸载系统依赖。
 
-如果采用保留数据模式，重新运行首次部署命令即可复用原配置、数据库和 WebUI 密码：
+如果采用保留数据模式，重新运行 GitHub 安装器即可复用原配置、数据库和 WebUI 密码：
 
-```powershell
-.\scripts\deploy.ps1 -HostAlias Gate-VPS -Bootstrap
+```sh
+curl -fL https://github.com/ClaraCora/gate/releases/latest/download/gate-install.sh \
+  -o /tmp/gate-install.sh
+sh /tmp/gate-install.sh
 ```
 
-## 11. 最小验收清单
+## 11. GitHub 发布机制
+
+仓库创建 `v*` tag 后，`.github/workflows/release.yml` 会先执行后端检查、前端测试和生产构建，
+再生成仅面向 Debian 13 amd64 / Python 3.13 的自包含包。Release 固定发布三个资产：
+
+- `gate-linux-amd64.tar.gz`：应用 wheel、全部运行依赖 wheel、WebUI、配置模板和部署脚本。
+- `gate-linux-amd64.tar.gz.sha256`：安装前强制验证的包校验值。
+- `gate-install.sh`：VPS 一键安装器。
+
+维护者发布新版本时，应先同步 `pyproject.toml`、`gate.__version__` 和前端版本，再推送同名 tag。
+例如版本为 `0.1.1` 时，tag 必须为 `v0.1.1`；版本不一致会使工作流立即失败。
+
+`scripts/deploy.ps1` 仍可用于开发或 GitHub Releases 故障时的应急发布，但它需要 Windows 本机
+具备开发环境，并可能在 VPS 从 PyPI 安装依赖，不是常规生产路径。
+
+## 12. 最小验收清单
 
 部署或迁移后至少确认：
 

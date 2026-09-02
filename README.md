@@ -19,7 +19,7 @@ v0.1 MVP 已实现并部署到真实 VPS，已完成生产链路、断线阻断�
 - FastAPI、SQLite、持久任务、事件历史、SSE 和数据保留
 - Argon2 管理员密码、签名会话、HttpOnly Cookie、CSRF 与 Origin 校验
 - React/TypeScript WebUI，覆盖桌面与 360px 以上移动视口
-- systemd 加固、Windows 一键 SSH 发布、失败自动回滚和 GitHub Actions
+- systemd 加固、GitHub 预编译发布、VPS 一键安装和失败自动回滚
 
 - 部署目标：SSH 主机别名 `HK-Aliyun`
 - 开发环境：Windows
@@ -98,21 +98,22 @@ Invoke-RestMethod -Method Post http://127.0.0.1:18080/api/v1/discovery/refresh
 
 ## 部署
 
-首次部署到已配置的 SSH 主机别名：
+GitHub Actions 会在 `v*` tag 上完成测试、前端构建和 Linux Python wheel 打包，并发布带
+SHA-256 的完整安装包。VPS 不需要 Git、Node.js、npm、编译器或访问 PyPI；以 root 执行：
 
-```powershell
-.\scripts\deploy.ps1 -HostAlias HK-Aliyun -Bootstrap
+```sh
+curl -fL https://github.com/ClaraCora/gate/releases/latest/download/gate-install.sh \
+  -o /tmp/gate-install.sh
+sh /tmp/gate-install.sh
 ```
 
-后续发布：
-
-```powershell
-.\scripts\deploy.ps1 -HostAlias HK-Aliyun
-```
-
-脚本要求 SSH 远端用户为 root，发布前自动执行前后端检查和生产构建。首次部署生成的管理员
-明文密码只在终端显示一次，不会写入 Git。完整前置条件、备份、回滚、诊断和凭据轮换见
+安装器会校验发布包、自动安装 OpenVPN、HAProxy、nftables、Python 3.13、sing-box 等必要运行时，
+然后从包内 wheelhouse 离线安装 Gate。更新时重新下载并执行同一安装器即可。首次部署生成的
+管理员明文密码只在终端显示一次，不会写入 Git。完整前置条件、固定版本安装、备份、回滚、
+诊断和凭据轮换见
 [完整部署与卸载教程](docs/DEPLOYMENT.md)和[运维手册](docs/OPERATIONS.md)。
+
+`scripts/deploy.ps1` 仅保留用于开发构建或 GitHub Releases 不可用时的应急发布，不是生产首选。
 
 ## 资源占用
 

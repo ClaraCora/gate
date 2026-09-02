@@ -28,7 +28,7 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends \
     ca-certificates curl haproxy iproute2 iptables nftables openvpn openssl \
-    python3 python3-pip python3-venv tar
+    python3 python3-venv tar
 
 if ! command -v sing-box >/dev/null 2>&1 || \
     ! sing-box version 2>/dev/null | grep -q "${SING_BOX_VERSION}"; then

@@ -1,0 +1,157 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag, for example v0.1.1"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gate-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
+      ASSET_NAME: gate-linux-amd64.tar.gz
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Validate release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tag must look like v0.1.1" >&2
+            exit 2
+          fi
+          project_version="$(python - <<'PY'
+          import pathlib
+          import tomllib
+
+          with pathlib.Path("pyproject.toml").open("rb") as source:
+              print(tomllib.load(source)["project"]["version"])
+          PY
+          )"
+          package_version="$(python - <<'PY'
+          import pathlib
+          import re
+
+          source = pathlib.Path("backend/src/gate/__init__.py").read_text(encoding="utf-8")
+          match = re.search(r'^__version__ = "([^"]+)"$', source, re.MULTILINE)
+          if match is None:
+              raise SystemExit("Unable to read gate.__version__")
+          print(match.group(1))
+          PY
+          )"
+          test "$RELEASE_TAG" = "v$project_version"
+          test "$project_version" = "$package_version"
+
+      - name: Test backend
+        run: |
+          python -m pip install -e ".[dev]" build
+          python -m ruff check backend
+          python -m ruff format --check backend
+          python -m mypy backend/src backend/tests
+          python -m pytest
+
+      - name: Test and build WebUI
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run test
+          npm run build
+
+      - name: Build self-contained Linux package
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m build --wheel
+
+          package_root="$RUNNER_TEMP/gate-package"
+          mkdir -p "$package_root/dist" "$package_root/wheelhouse" "$package_root/frontend"
+          cp -a config deploy docs "$package_root/"
+          cp -a frontend/dist "$package_root/frontend/dist"
+          cp -a README.md LICENSE "$package_root/"
+          cp dist/gate_control-*.whl "$package_root/dist/"
+          chmod 0755 "$package_root/deploy/bootstrap.sh" \
+            "$package_root/deploy/install-release.sh" \
+            "$package_root/deploy/install-from-github.sh" \
+            "$package_root/deploy/uninstall.sh"
+          printf '%s\n' "$RELEASE_TAG" >"$package_root/RELEASE_VERSION"
+          printf '%s\n' "$GITHUB_SHA" >"$package_root/RELEASE_COMMIT"
+
+          app_wheel="$(find "$package_root/dist" -maxdepth 1 -type f -name 'gate_control-*.whl' -print)"
+          test -n "$app_wheel"
+          test "$(printf '%s\n' "$app_wheel" | wc -l)" -eq 1
+          python -m pip download \
+            --dest "$package_root/wheelhouse" \
+            --only-binary=:all: \
+            "$app_wheel"
+          rm -f "$package_root/wheelhouse"/gate_control-*.whl
+
+          python -m venv "$RUNNER_TEMP/gate-offline-test"
+          "$RUNNER_TEMP/gate-offline-test/bin/python" -m pip install \
+            --no-index \
+            --find-links "$package_root/wheelhouse" \
+            "$app_wheel"
+          "$RUNNER_TEMP/gate-offline-test/bin/python" -c \
+            'import gate; print(f"verified gate-control {gate.__version__}")'
+
+          (
+            cd "$package_root"
+            find . -type f ! -name SHA256SUMS -print0 \
+              | sort -z \
+              | xargs -0 sha256sum >SHA256SUMS
+          )
+          tar -C "$package_root" -czf "$ASSET_NAME" .
+          sha256sum "$ASSET_NAME" >"$ASSET_NAME.sha256"
+          cp deploy/install-from-github.sh gate-install.sh
+          chmod 0755 gate-install.sh
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-${{ env.RELEASE_TAG }}-linux-amd64
+          path: |
+            gate-linux-amd64.tar.gz
+            gate-linux-amd64.tar.gz.sha256
+            gate-install.sh
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          assets=("$ASSET_NAME" "$ASSET_NAME.sha256" gate-install.sh)
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+          else
+            gh release create "$RELEASE_TAG" "${assets[@]}" \
+              --target "$GITHUB_SHA" \
+              --title "Gate $RELEASE_TAG" \
+              --generate-notes
+          fi

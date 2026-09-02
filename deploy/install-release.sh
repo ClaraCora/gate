@@ -24,6 +24,7 @@ TARGET="$RELEASE_ROOT/$RELEASE_ID"
 CURRENT=/opt/gate/current
 PREVIOUS=""
 ACTIVATED=0
+TARGET_CREATED=0
 
 resolved_current="$(readlink -f "$CURRENT" 2>/dev/null || true)"
 case "$resolved_current" in
@@ -43,16 +44,22 @@ switch_current() {
 }
 
 rollback() {
-    [ "$ACTIVATED" -eq 1 ] || return 0
-    if [ -n "$PREVIOUS" ] && [ -d "$PREVIOUS" ]; then
-        switch_current "$PREVIOUS"
-        systemctl restart gate-worker.service gate-api.service >/dev/null 2>&1 || true
-    else
-        active_target="$(readlink -f "$CURRENT" 2>/dev/null || true)"
-        if [ "$active_target" = "$TARGET" ]; then
-            rm -f -- "$CURRENT"
+    if [ "$ACTIVATED" -eq 1 ]; then
+        if [ -n "$PREVIOUS" ] && [ -d "$PREVIOUS" ]; then
+            switch_current "$PREVIOUS"
+            systemctl restart gate-worker.service gate-api.service >/dev/null 2>&1 || true
+        else
+            active_target="$(readlink -f "$CURRENT" 2>/dev/null || true)"
+            if [ "$active_target" = "$TARGET" ]; then
+                rm -f -- "$CURRENT"
+            fi
+            systemctl stop gate-worker.service gate-api.service >/dev/null 2>&1 || true
         fi
-        systemctl stop gate-worker.service gate-api.service >/dev/null 2>&1 || true
+    fi
+    if [ "$TARGET_CREATED" -eq 1 ]; then
+        case "$TARGET" in
+            "$RELEASE_ROOT"/*) rm -rf -- "$TARGET" ;;
+        esac
     fi
 }
 
@@ -69,15 +76,36 @@ trap on_exit EXIT
 trap 'exit 130' HUP INT TERM
 
 if [ -e "$TARGET" ]; then
-    echo "Release already exists: $TARGET" >&2
+    active_target="$(readlink -f "$CURRENT" 2>/dev/null || true)"
+    if [ "$active_target" = "$TARGET" ] && \
+        curl --fail --silent http://127.0.0.1:18080/api/v1/health/ready >/dev/null; then
+        rm -f -- "$ARCHIVE"
+        trap - EXIT HUP INT TERM
+        echo "Gate release $RELEASE_ID is already installed and ready."
+        exit 0
+    fi
+    echo "Release directory already exists but is not the ready active release: $TARGET" >&2
     exit 2
 fi
 install -d -o root -g root -m 0755 "$TARGET"
+TARGET_CREATED=1
 tar -xzf "$ARCHIVE" -C "$TARGET"
 
 python3 -m venv "$TARGET/.venv"
-"$TARGET/.venv/bin/python" -m pip install --upgrade pip
-"$TARGET/.venv/bin/python" -m pip install "$TARGET"
+app_wheels="$(find "$TARGET/dist" -maxdepth 1 -type f -name 'gate_control-*.whl' -print 2>/dev/null || true)"
+if [ -n "$app_wheels" ] && [ -d "$TARGET/wheelhouse" ]; then
+    if [ "$(printf '%s\n' "$app_wheels" | wc -l)" -ne 1 ]; then
+        echo "Release package must contain exactly one gate-control wheel" >&2
+        exit 3
+    fi
+    "$TARGET/.venv/bin/python" -m pip install \
+        --no-index \
+        --find-links "$TARGET/wheelhouse" \
+        "$app_wheels"
+else
+    echo "Legacy source package detected; Python dependencies may be downloaded from PyPI." >&2
+    "$TARGET/.venv/bin/python" -m pip install "$TARGET"
+fi
 
 if [ ! -f /etc/gate/secrets.env ]; then
     initial_password="$(openssl rand -base64 24 | tr -d '\n')"

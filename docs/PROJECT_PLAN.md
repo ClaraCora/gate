@@ -17,9 +17,10 @@ SOCKS5 端口。底层节点可以因质量变化或故障自动切换，但客�
 系统同时提供 WebUI，用于查看各地区端口、活动出口、线路质量、历史可用率和任务状态，并
 支持立即测试、选择节点、手动切换、锁定线路、恢复自动模式和查看失败原因。
 
-本项目采用 Windows 开发、SSH 部署到 VPS 的工作方式。Windows 负责代码、单元测试、前端
-构建和发布打包；所有 network namespace、OpenVPN、nftables、HAProxy 和防泄漏验证都在
-真实 VPS 上执行。
+本项目可在 Windows 开发，但生产构建与发布统一由 GitHub Actions 完成。Linux VPS 直接下载
+已编译 Release，只负责安装系统运行依赖、运行服务和集成测试，不安装 Git、Node.js、npm 或
+编译工具。所有 network namespace、OpenVPN、nftables、HAProxy 和防泄漏验证都在真实 VPS
+上执行。
 
 ## 2. 背景与约束
 
@@ -58,7 +59,7 @@ VPN Gate API 当前提供 CSV 数据，主要字段包括：
 - 切换失败时保持旧线路或自动回滚。
 - VPN 掉线时阻断代理流量，避免原始 VPS 出口泄漏。
 - 用 WebUI 清晰展示运行状态、候选节点、任务和历史事件。
-- 支持从 Windows 使用一个 PowerShell 命令通过 SSH 发布。
+- 支持在 VPS 使用一个 shell 命令从 GitHub Release 校验、安装和升级。
 
 ### 3.2 非功能目标
 
@@ -597,7 +598,7 @@ regions:
 VPN Gate 运营者可能记录连接和流量元数据。Gate 默认不记录用户访问的目标域名和 URL，只记录
 健康探测、节点、出口 IP 和系统事件。使用公共出口时仍必须依赖 HTTPS/TLS 保护内容。
 
-## 20. Windows 开发与 SSH 部署
+## 20. Windows 开发与 GitHub Release 部署
 
 ### 20.1 本地开发
 
@@ -660,30 +661,32 @@ gate/
 /var/log/gate/  # 仅在不完全使用 journald 时存在
 ```
 
-### 20.4 PowerShell 部署入口
+### 20.4 GitHub Release 部署入口
 
-预期命令：
+GitHub Actions 在 `v*` tag 上执行测试并生成 Linux amd64 自包含发布包。VPS 预期命令：
 
-```powershell
-.\scripts\deploy.ps1 -HostAlias HK-Aliyun
+```sh
+curl -fL https://github.com/ClaraCora/gate/releases/latest/download/gate-install.sh \
+  -o /tmp/gate-install.sh
+sh /tmp/gate-install.sh
 ```
 
 部署流程：
 
-1. 检查本地分支和依赖，执行全部快速测试。
-2. 构建 React 静态资源和 Python wheel/发布包。
-3. 生成包含 Git commit、构建时间和校验和的 release manifest。
-4. 通过 `scp` 上传到 VPS 临时文件名，校验后原子改名。
-5. 通过 SSH 调用受控的 `install-release.sh`。
-6. 创建新版本目录、Python venv，安装锁定依赖。
+1. GitHub Actions 执行后端、前端检查和测试。
+2. 构建 React 静态资源和 Python wheel。
+3. 下载 Linux amd64 / Python 3.13 的完整运行依赖 wheelhouse。
+4. 生成包含 Git commit、版本和校验和的发布包并上传 GitHub Release。
+5. VPS 下载发布包和 SHA-256 文件并强制校验。
+6. 创建新版本目录和 Python venv，从包内 wheelhouse 离线安装依赖。
 7. 运行 Alembic 数据库迁移。
 8. 原子切换 `/opt/gate/current`。
 9. 依次重启 worker、controller、api，重新加载 HAProxy。
 10. 执行就绪检查和至少一个地区的稳定端口探测。
 11. 检查失败时恢复旧 symlink、回滚兼容迁移并重启旧版本。
 
-首次部署由 `bootstrap.sh` 安装系统依赖、创建用户和目录、写入 systemd 单元，并以 dry-run
-验证 nftables 和 HAProxy 配置。常规发布不得每次重新修改系统基础设施。
+首次部署由包内 `bootstrap.sh` 安装系统运行依赖并创建用户和目录。脚本保持幂等，更新时可安全
+重跑；VPS 不安装 Git、Node.js、npm 或编译工具，也不访问 PyPI。
 
 生产依赖版本必须锁定，下载的 sing-box 等外部二进制必须固定版本并验证 SHA-256，不能在部署
 时直接执行未固定版本的远端安装脚本。
@@ -792,7 +795,7 @@ MVP 完成需同时满足：
 8. Web/API/SOCKS 默认不监听公网地址。
 9. OpenVPN 危险指令和外部路径测试样本全部被净化器拒绝。
 10. VPS 重启后服务和已启用地区能够自动恢复或明确报告失败。
-11. Windows 可以通过 `deploy.ps1 -HostAlias HK-Aliyun` 完成带健康检查的发布。
+11. GitHub Release 安装器可在全新 VPS 完成校验、安装、健康检查和失败回滚。
 12. 所有核心单元测试、VPS 集成测试和 WebUI 关键流程测试通过。
 
 性能目标不是硬性公网 SLA，但系统自身应达到：
@@ -857,7 +860,7 @@ MVP 完成需同时满足：
 | M2 Linux 数据面 | netns、nftables、OpenVPN、SOCKS、HAProxy | 2 至 3 天 |
 | M3 控制器 | 任务、状态机、调度、A/B 切换、reconcile | 2 至 3 天 |
 | M4 WebUI | 总览、候选、任务、设置、SSE | 2 至 3 天 |
-| M5 发布与加固 | systemd、deploy.ps1、回滚、日志、安全测试 | 1.5 至 2 天 |
+| M5 发布与加固 | systemd、GitHub Release、一键安装、回滚、日志、安全测试 | 1.5 至 2 天 |
 
 单人连续开发的 MVP 预计为 9 至 14 个有效工作日。VPN Gate 节点的不确定性会影响 Linux 集成
 测试时间，因此应先完成 M2 的日本单地区纵向验证，再扩展到全部地区。
@@ -868,7 +871,7 @@ MVP 完成需同时满足：
 2. 完成 kill switch 测试，再实现 A/B 切换和回滚。
 3. 扩展到韩国及全部地区配置。
 4. 接入控制器自动化和历史评分。
-5. 完成 WebUI 与 Windows SSH 发布。
+5. 完成 WebUI、GitHub Release 构建与 VPS 一键安装。
 6. 最后增加热备用、UDP 或公网访问等非 MVP 能力。
 
 ## 28. 运维手册范围
@@ -892,5 +895,5 @@ Gate 的核心原则是“固定入口、动态出口、先验证后切换、失
 控制器使用 VPS 实测历史和迟滞机制选择线路；WebUI 只负责控制和观察，不持有 root 权限。
 
 当前 `HK-Aliyun` 的 2 vCPU、约 4 GiB 内存和 26 GiB 可用磁盘满足方案要求。项目可以在
-Windows 完成绝大多数开发，通过 SSH 在该 VPS 进行真实网络验证和原子发布，不需要 WSL2，
-也不需要将高权限网络操作放进 Docker 容器。
+Windows 完成日常开发，GitHub Actions 生成生产发布包，再通过 SSH 在真实 VPS 进行网络验证；
+不需要 WSL2，也不需要将高权限网络操作放进 Docker 容器。

@@ -1,8 +1,7 @@
 # Gate 运维手册
 
-本文面向单台 Debian VPS 上的 Gate 实例。示例使用 Windows PowerShell 和 SSH 主机别名
-`HK-Aliyun`。除非明确说明，VPS 命令需要 root 权限；当前发布脚本要求该 SSH 别名直接登录
-root 账户。
+本文面向单台 Debian VPS 上的 Gate 实例。发布包由 GitHub Actions 预编译，VPS 直接下载安装；
+Windows 只用于 SSH 访问和端口转发。除非明确说明，VPS 命令需要 root 权限。
 
 ## 1. 目录与服务
 
@@ -30,39 +29,39 @@ namespace 命名为 `gate-<region>-<slot>`。
 
 ### 2.1 前置检查
 
-在 Windows 项目目录执行：
+从 Windows 检查 VPS：
 
 ```powershell
 ssh HK-Aliyun "id -u; cat /etc/os-release | head; uname -m"
 ```
 
-期望第一行是 `0`，系统为 Debian，架构为 `x86_64`。确认仓库内检查通过：
+期望第一行是 `0`，系统为 Debian 13，架构为 `x86_64`。VPS 需要能访问 Debian 软件源、GitHub
+和 VPN Gate，不需要 Git、Node.js、npm、编译器或 PyPI。
 
-```powershell
-.\scripts\test.ps1
+### 2.2 从 GitHub Release 安装
+
+进入 VPS 后下载并执行 Release 安装器。它会自动安装 OpenVPN、HAProxy、nftables、sing-box、
+Python 等必要运行时：
+
+```sh
+curl -fL https://github.com/ClaraCora/gate/releases/latest/download/gate-install.sh \
+  -o /tmp/gate-install.sh
+sh /tmp/gate-install.sh
 ```
 
-### 2.2 Bootstrap 与发布
+后续更新重新下载并执行同一命令。安装指定版本时使用：
 
-首次部署安装 OpenVPN、HAProxy、nftables、sing-box、Python 等依赖：
-
-```powershell
-.\scripts\deploy.ps1 -HostAlias HK-Aliyun -Bootstrap
-```
-
-后续发布不需要重复 bootstrap：
-
-```powershell
-.\scripts\deploy.ps1 -HostAlias HK-Aliyun
+```sh
+sh /tmp/gate-install.sh --version v0.1.1
 ```
 
 首次安装会在终端输出一次 `Gate WebUI initial admin password`。立即放入密码管理器；脚本只把
 Argon2 散列写入 `/etc/gate/secrets.env`，不会把明文写入仓库或 VPS 文件。若终端输出丢失，按
 第 10 节轮换密码，不要尝试从散列恢复。
 
-发布脚本会在本地执行检查和前端构建，将 release 上传到 `/tmp`，在 VPS 创建独立虚拟环境，
-原子切换 `/opt/gate/current`，重启服务，并等待就绪接口。安装失败时会把 current 链接和服务
-恢复到前一版本。
+GitHub Actions 已完成检查、前端构建、应用 wheel 和 Linux amd64 依赖下载。VPS 安装器先验证
+SHA-256，再从包内 wheelhouse 离线创建虚拟环境，原子切换 `/opt/gate/current`，重启服务并等待
+就绪接口。安装失败时会恢复前一版本；同一版本重复执行不会重复创建 release。
 
 ### 2.3 首次就绪检查
 
@@ -355,7 +354,7 @@ ssh HK-Aliyun "systemd-cgtop -b -n 1 | grep -E 'gate|haproxy' || true; systemctl
 ## 14. VPS 迁移
 
 1. 在旧 VPS 按第 7 节备份。
-2. 在新 VPS 配置 SSH 别名并执行首次 bootstrap/deploy。
+2. 在新 VPS 直接执行 GitHub Release 安装器。
 3. 停止新实例，按第 8 节恢复数据库和配置。
 4. 轮换 session secret 和管理员密码。
 5. 验证监听、JP/KR 出口、远端 DNS 和 fail-closed。
