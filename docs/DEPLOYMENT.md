@@ -198,9 +198,9 @@ sh /tmp/gate-install.sh
 安装指定版本时，安装器和目标资产使用同一个 tag：
 
 ```sh
-curl -fL https://github.com/ClaraCora/gate/releases/download/v0.1.7/gate-install.sh \
+curl -fL https://github.com/ClaraCora/gate/releases/download/v0.1.8/gate-install.sh \
   -o /tmp/gate-install.sh
-sh /tmp/gate-install.sh --version v0.1.7
+sh /tmp/gate-install.sh --version v0.1.8
 ```
 
 重复安装当前版本是幂等操作；新版本会原子切换 `/opt/gate/current`，就绪检查失败时自动恢复上一
@@ -301,7 +301,7 @@ sh /tmp/gate-install.sh
 - `gate-install.sh`：VPS 一键安装器。
 
 维护者发布新版本时，应先同步 `pyproject.toml`、`gate.__version__` 和前端版本，再推送同名 tag。
-例如版本为 `0.1.7` 时，tag 必须为 `v0.1.7`；版本不一致会使工作流立即失败。
+例如版本为 `0.1.8` 时，tag 必须为 `v0.1.8`；版本不一致会使工作流立即失败。
 
 `scripts/deploy.ps1` 仍可用于开发或 GitHub Releases 故障时的应急发布，但它需要 Windows 本机
 具备开发环境，并可能在 VPS 从 PyPI 安装依赖，不是常规生产路径。

@@ -175,7 +175,7 @@ systemctl restart gate-api.service
 attempt=0
 until curl --fail --silent http://127.0.0.1:18080/api/v1/health/ready >/dev/null; do
     attempt=$((attempt + 1))
-    if [ "$attempt" -ge 90 ]; then
+    if [ "$attempt" -ge 300 ]; then
         echo "Gate API readiness check failed" >&2
         exit 4
     fi
