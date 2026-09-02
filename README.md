@@ -9,7 +9,8 @@ Gate 是一个部署在单台 Linux VPS 上的 VPN Gate 多地区 SOCKS5 出口�
 
 v0.1 MVP 已实现并部署到真实 VPS，已完成生产链路、断线阻断、A/B 切换和 WebUI 验收：
 
-- 五个固定 SOCKS5 端口和独立地区策略
+- 可按地区预置多个固定 SOCKS5 入口, 每个入口拥有独立 A/B 数据面
+- 同地区活动入口排除重复节点, 切换提交前同时校验真实出口 IP 不重复
 - VPN Gate CSV 容错解析、候选粗筛和定时发现
 - OpenVPN 配置严格净化、PEM 与证书/私钥匹配校验
 - Linux network namespace、nftables kill switch、sing-box 和 HAProxy A/B 数据面
@@ -41,6 +42,10 @@ v0.1 MVP 已实现并部署到真实 VPS，已完成生产链路、断线阻断�
 | 北美 | `US, CA` | `11083` |
 | 欧洲 | `DE, NL, FR, GB, RO, PL, ES, IT, SE, FI, CH, AT` | `11084` |
 | 东南亚 | `SG, TH, VN, ID, MY, PH` | `11085` |
+
+日本另外预置 `jp-02` 至 `jp-10` 九个入口, 端口为 `11101-11109`, 默认关闭。可在 WebUI
+逐个开启需要的入口; 关闭状态不创建 OpenVPN、sing-box 或 network namespace。入口定义位于
+`config/gate.example.yaml`, `group_id` 相同的入口属于同一地区并共享去重约束。
 
 如果某地区没有合格节点，对应端口应明确报告不可用，不能静默使用错误地区出口。
 
@@ -110,8 +115,9 @@ Invoke-RestMethod -Method Post http://127.0.0.1:18080/api/v1/discovery/refresh
 
 ## 资源占用
 
-Gate 不在代理流量热路径中运行 Python；主要资源来自活动 OpenVPN 和 sing-box 进程。五个
-冷备用地区的规划预算为：
+Gate 不在代理流量热路径中运行 Python；主要资源来自已开启入口的 OpenVPN 和 sing-box
+进程。关闭的预置入口仅增加少量数据库记录和 HAProxy 静态配置, 不会常驻隧道进程。五个
+活动入口的规划预算为：
 
 | 资源 | 预算 |
 | --- | ---: |

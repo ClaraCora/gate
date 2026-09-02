@@ -15,13 +15,16 @@ export interface SessionState {
 
 export interface Region {
   id: string;
+  group_id: string;
   name: string;
   countries: string[];
   socks_port: number;
+  network_index: number;
   enabled: boolean;
   mode: RegionMode;
   status: RegionStatus;
   active_node_id: number | null;
+  active_egress_ip: string | null;
   candidate_count: number;
   updated_at: string;
 }
@@ -76,6 +79,8 @@ export interface GateEvent {
   code: string;
   level: "info" | "warning" | "error" | string;
   message: string;
+  region_id: string | null;
+  node_id: number | null;
   details: Record<string, unknown>;
   created_at: string;
 }

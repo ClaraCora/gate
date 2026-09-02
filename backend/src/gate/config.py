@@ -79,10 +79,12 @@ class RetentionConfig(BaseModel):
 
 class RegionConfig(BaseModel):
     id: str = Field(pattern=r"^[a-z][a-z0-9-]{0,15}$")
+    group_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9-]{0,15}$")
     name: str = Field(min_length=1, max_length=80)
     countries: tuple[str, ...]
     socks_port: int = Field(ge=1, le=65535)
     network_index: int = Field(ge=1, le=8192)
+    enabled: bool = True
 
     @field_validator("countries")
     @classmethod
@@ -93,6 +95,12 @@ class RegionConfig(BaseModel):
         ):
             raise ValueError("countries must contain two-letter country codes")
         return normalized
+
+    @model_validator(mode="after")
+    def default_group_id(self) -> RegionConfig:
+        if self.group_id is None:
+            self.group_id = self.id
+        return self
 
 
 class GateSettings(BaseModel):
@@ -116,6 +124,12 @@ class GateSettings(BaseModel):
             raise ValueError("SOCKS ports must be unique")
         if len(network_indexes) != len(set(network_indexes)):
             raise ValueError("region network indexes must be unique")
+        group_countries: dict[str, tuple[str, ...]] = {}
+        for region in self.regions:
+            assert region.group_id is not None
+            existing = group_countries.setdefault(region.group_id, region.countries)
+            if existing != region.countries:
+                raise ValueError("entries in the same region group must use identical countries")
         return self
 
 

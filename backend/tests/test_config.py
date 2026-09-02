@@ -13,13 +13,16 @@ def test_loads_project_example_config() -> None:
         "https://r.jina.ai/http://www.vpngate.net/api/iphone/",
     )
     assert settings.automation.health_interval_seconds == 120
-    assert [region.socks_port for region in settings.regions] == [
+    assert [region.socks_port for region in settings.regions[:5]] == [
         11081,
         11082,
         11083,
         11084,
         11085,
     ]
+    japan_entries = [region for region in settings.regions if region.group_id == "jp"]
+    assert len(japan_entries) == 10
+    assert [region.enabled for region in japan_entries] == [True] + [False] * 9
 
 
 def test_rejects_duplicate_socks_ports() -> None:

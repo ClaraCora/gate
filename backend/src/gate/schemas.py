@@ -28,13 +28,16 @@ class SessionResponse(BaseModel):
 
 class RegionResponse(BaseModel):
     id: str
+    group_id: str
     name: str
     countries: list[str]
     socks_port: int
+    network_index: int
     enabled: bool
     mode: str
     status: str
     active_node_id: int | None
+    active_egress_ip: str | None
     candidate_count: int
     updated_at: datetime
 
@@ -93,6 +96,8 @@ class EventResponse(BaseModel):
     code: str
     level: str
     message: str
+    region_id: str | None
+    node_id: int | None
     details: dict[str, Any]
     created_at: datetime
 

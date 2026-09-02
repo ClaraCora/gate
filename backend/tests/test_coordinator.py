@@ -9,7 +9,7 @@ from gate.config import load_settings
 from gate.coordinator import SwitchCoordinator, SwitchError
 from gate.database import Database
 from gate.discovery import DiscoveryService
-from gate.domain import RegionStatus, VpnGateNode
+from gate.domain import RegionMode, RegionStatus, VpnGateNode
 from gate.probes import EgressProbe
 from gate.profiles import sanitize_openvpn_profile
 from gate.worker_protocol import DestroySlotRequest, InspectRequest, ProvisionSlotRequest, Request
@@ -215,6 +215,33 @@ async def test_candidate_probe_uses_inactive_slot_without_touching_haproxy(
     assert isinstance(worker.requests[1], ProvisionSlotRequest)
     assert isinstance(worker.requests[-1], DestroySlotRequest)
     assert await database.get_active_slot("jp") is None
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_disabling_region_destroys_both_slots(tmp_path: Path, encoded_profile: str) -> None:
+    database, discovery, node_id = await _seed(tmp_path, encoded_profile)
+    await database.complete_switch("jp", "a", node_id)
+    worker = FakeWorker()
+    haproxy = FakeHaProxy()
+    coordinator = SwitchCoordinator(
+        database,
+        discovery,
+        worker=worker,
+        haproxy=haproxy,
+    )
+
+    await coordinator.set_region_mode("jp", RegionMode.DISABLED)
+
+    region = await database.get_region("jp")
+    assert region is not None
+    assert region.mode == RegionMode.DISABLED
+    assert region.status == RegionStatus.DISABLED
+    assert region.active_node_id is None
+    assert haproxy.commands == [("disable", "jp", "a"), ("disable", "jp", "b")]
+    assert DestroySlotRequest(action="destroy_slot", region_id="jp", slot="a") in worker.requests
+    assert DestroySlotRequest(action="destroy_slot", region_id="jp", slot="b") in worker.requests
+    assert all(slot.state == "empty" for slot in await database.list_slots())
     await database.close()
 
 

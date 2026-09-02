@@ -20,7 +20,7 @@ root 账户。
 | `gate-api.service` | FastAPI、WebUI、调度器和控制器 |
 | `gate-worker.service` | root 网络 worker |
 | `gate-firewall.service` | 宿主转发和 NAT 规则 |
-| `haproxy.service` | 五个固定 SOCKS5 入口 |
+| `haproxy.service` | 配置中全部固定 SOCKS5 入口 |
 
 OpenVPN 和 sing-box 以 transient systemd unit 运行，命名分别为
 `gate-openvpn-<region>-<slot>.service` 和 `gate-socks-<region>-<slot>.service`。network
@@ -192,14 +192,18 @@ ssh HK-Aliyun "systemctl restart gate-firewall gate-worker gate-api"
 ssh HK-Aliyun "cp -a /etc/gate/config.yaml /etc/gate/config.yaml.bak; ss -lnt | grep 1108 || true"
 ```
 
-修改后重启 API 和 worker：
+同一地区可配置多个入口。每个入口必须使用唯一的 `id`、`socks_port` 和 `network_index`, 同组
+入口使用相同 `group_id` 与 `countries`。新增入口建议默认写入 `enabled: false`, 发布后再从
+WebUI 按需开启。
+
+HAProxy 配置由 `gate-render-haproxy` 根据 `/etc/gate/config.yaml` 生成。修改入口定义后执行：
 
 ```powershell
-ssh HK-Aliyun "systemctl restart gate-worker gate-api; curl --fail http://127.0.0.1:18080/api/v1/health/ready"
+ssh HK-Aliyun "set -eu; temp=/etc/haproxy/.gate-manual.cfg; /opt/gate/current/.venv/bin/gate-render-haproxy --config /etc/gate/config.yaml --output `$temp; haproxy -c -f `$temp; install -o root -g root -m 0644 `$temp /etc/haproxy/haproxy.cfg; rm -f `$temp; systemctl reload-or-restart haproxy; systemctl restart gate-worker gate-api; curl --fail http://127.0.0.1:18080/api/v1/health/ready"
 ```
 
-HAProxy 的五个监听端口是发布配置的一部分。仅修改 YAML 中的端口不会自动重写
-`/etc/haproxy/haproxy.cfg`；改变预设端口时必须同步修改 HAProxy 配置并重新发布。
+常规发布会自动按 VPS 当前配置重新生成 HAProxy。手动修改 YAML 时必须运行上面的生成与校验
+命令, 不能只重启 API 和 worker。
 
 日常停用、锁定和恢复自动模式应通过 WebUI 完成，这样操作会进入任务和事件记录。不要用
 `systemctl stop gate-openvpn-*` 代替模式控制。

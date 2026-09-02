@@ -74,6 +74,7 @@ class SwitchCoordinator:
         self.probe = probe
         self.drain_seconds = drain_seconds
         self._region_locks: dict[str, asyncio.Lock] = {}
+        self._group_locks: dict[str, asyncio.Lock] = {}
         self._cleanup_tasks: set[asyncio.Task[None]] = set()
 
     async def _destroy_slot(self, region_id: str, slot: Literal["a", "b"]) -> None:
@@ -101,7 +102,7 @@ class SwitchCoordinator:
                 await self.database.add_event(
                     code="DRAIN_CLEANUP_FAILED",
                     level="error",
-                    message=f"Failed to clean drained slot {region_id}/{slot}",
+                    message=f"入口 {region_id} 的 {slot.upper()} 隧道清理失败",
                     region_id=region_id,
                     node_id=record.node_id,
                     details={"slot": slot, "error_code": exc.code},
@@ -109,7 +110,7 @@ class SwitchCoordinator:
                 return
             await self.database.add_event(
                 code="DRAIN_COMPLETED",
-                message=f"Drained slot {region_id}/{slot} was cleaned",
+                message=f"入口 {region_id} 的 {slot.upper()} 隧道已完成排空并清理",
                 region_id=region_id,
                 node_id=record.node_id,
                 details={"slot": slot},
@@ -166,16 +167,36 @@ class SwitchCoordinator:
                     await self.database.add_event(
                         code="RECONCILE_REJECTED_ACTIVE_SLOT",
                         level="error",
-                        message=f"{region.name} active slot failed startup verification",
+                        message=f"{region.name} 的活动隧道未通过启动校验, 已停止使用",
                         region_id=record.region_id,
                         node_id=record.node_id,
                         details={"slot": record.slot, "error_code": error_code},
                     )
                     continue
+                conflict = await self.database.get_active_conflict(
+                    record.region_id,
+                    node_id=record.node_id or 0,
+                    egress_ip=probe.egress_ip,
+                )
+                if conflict is not None:
+                    await self._destroy_slot(record.region_id, slot)
+                    await self.database.add_event(
+                        code="RECONCILE_DUPLICATE_EXIT",
+                        level="error",
+                        message=(
+                            f"{region.name} 与 {conflict.name} 使用了重复出口 "
+                            f"{probe.egress_ip}, 当前入口已关闭"
+                        ),
+                        region_id=record.region_id,
+                        node_id=record.node_id,
+                        details={"conflicting_region_id": conflict.id},
+                    )
+                    continue
                 await self.haproxy.ready(record.region_id, record.slot)
+                await self.database.set_active_egress_ip(record.region_id, probe.egress_ip)
                 await self.database.add_event(
                     code="RECONCILE_VERIFIED_ACTIVE_SLOT",
-                    message=f"{region.name} active slot was verified after startup",
+                    message=f"{region.name} 的活动隧道已通过启动校验",
                     region_id=record.region_id,
                     node_id=record.node_id,
                     details={
@@ -223,10 +244,16 @@ class SwitchCoordinator:
         *,
         progress: ProgressCallable | None = None,
     ) -> SwitchResult:
-        lock = self._region_locks.setdefault(region_id, asyncio.Lock())
-        if lock.locked():
-            raise SwitchError(f"a switch is already running for region: {region_id}")
-        async with lock:
+        region = await self.database.get_region(region_id)
+        if region is None:
+            raise SwitchError(f"未知入口: {region_id}")
+        group_lock = self._group_locks.setdefault(region.group_id, asyncio.Lock())
+        region_lock = self._region_locks.setdefault(region_id, asyncio.Lock())
+        if group_lock.locked():
+            raise SwitchError(f"同地区已有切换任务正在运行: {region.group_id}")
+        if region_lock.locked():
+            raise SwitchError(f"此入口已有任务正在运行: {region_id}")
+        async with group_lock, region_lock:
             return await self._switch(region_id, node_id, progress=progress)
 
     async def probe_candidate(
@@ -260,7 +287,7 @@ class SwitchCoordinator:
         active = await self.database.get_active_slot(region_id)
         target_slot = self._target_slot(active)
         started_at = utc_now()
-        await report(0.05, "Preparing an isolated candidate slot")
+        await report(0.05, "正在准备隔离的候选隧道")
         try:
             await self._destroy_slot(region_id, target_slot)
             worker_data = await self.worker.request(
@@ -278,7 +305,7 @@ class SwitchCoordinator:
             namespace_ip = worker_data.get("namespace_ip")
             if not isinstance(namespace_ip, str):
                 raise SwitchError("gate-worker did not return the slot address")
-            await report(0.55, "Testing HTTPS, DNS, exit IP, and country")
+            await report(0.55, "正在测试 HTTPS、DNS、出口 IP 和国家")
             probe = await self.probe(
                 namespace_ip,
                 1080,
@@ -296,7 +323,7 @@ class SwitchCoordinator:
             )
             await self.database.add_event(
                 code="CANDIDATE_PROBE_COMPLETED",
-                message=f"{region.name} candidate {node.ip} verified as {probe.egress_ip}",
+                message=f"{region.name} 的候选节点 {node.ip} 已验证, 出口为 {probe.egress_ip}",
                 region_id=region_id,
                 node_id=node_id,
                 details={
@@ -306,7 +333,7 @@ class SwitchCoordinator:
                     "latency_ms": probe.latency_ms,
                 },
             )
-            await report(0.9, "Candidate verified; cleaning the temporary slot")
+            await report(0.9, "候选节点已验证, 正在清理临时隧道")
             return CandidateProbeResult(
                 region_id=region_id,
                 node_id=node_id,
@@ -328,7 +355,7 @@ class SwitchCoordinator:
             await self.database.add_event(
                 code="CANDIDATE_PROBE_FAILED",
                 level="warning",
-                message=f"{region.name} candidate {node.ip} failed validation",
+                message=f"{region.name} 的候选节点 {node.ip} 未通过出口校验",
                 region_id=region_id,
                 node_id=node_id,
                 details={"slot": target_slot, "error_code": error_code},
@@ -357,6 +384,9 @@ class SwitchCoordinator:
                 await progress(value, message)
 
         region, node = await self._load(region_id, node_id)
+        conflict = await self.database.get_active_conflict(region_id, node_id=node_id)
+        if conflict is not None:
+            raise SwitchError(f"节点已被同地区入口 {conflict.name} 使用")
         profile = self.discovery.profiles.get(node.fingerprint)
         if profile is None:
             raise SwitchError("candidate profile is not cached; refresh discovery and retry")
@@ -370,7 +400,7 @@ class SwitchCoordinator:
         target_enabled = False
 
         await self.database.set_region_status(region_id, RegionStatus.SWITCHING)
-        await report(0.05, "Preparing the inactive slot")
+        await report(0.05, "正在准备备用隧道")
         try:
             await self._destroy_slot(region_id, target_slot)
             worker_data = await self.worker.request(
@@ -388,18 +418,28 @@ class SwitchCoordinator:
             namespace_ip = worker_data.get("namespace_ip")
             if not isinstance(namespace_ip, str):
                 raise SwitchError("gate-worker did not return the slot address")
-            await report(0.45, "Testing the candidate through its isolated SOCKS endpoint")
+            await report(0.45, "正在通过隔离 SOCKS 入口测试候选节点")
             direct_probe = await self.probe(
                 namespace_ip,
                 1080,
                 expected_countries=set(region.countries),
             )
 
+            conflict = await self.database.get_active_conflict(
+                region_id,
+                node_id=node_id,
+                egress_ip=direct_probe.egress_ip,
+            )
+            if conflict is not None:
+                raise SwitchError(
+                    f"出口 {direct_probe.egress_ip} 已被同地区入口 {conflict.name} 使用"
+                )
+
             await self.haproxy.ready(region_id, target_slot)
             target_enabled = True
             if active is not None:
                 await self.haproxy.drain(region_id, active.slot)
-            await report(0.75, "Verifying the stable regional port")
+            await report(0.75, "正在验证固定 SOCKS 端口")
             stable_probe = await self.probe(
                 "127.0.0.1",
                 region.socks_port,
@@ -408,7 +448,12 @@ class SwitchCoordinator:
             if stable_probe.egress_ip != direct_probe.egress_ip:
                 raise SwitchError("stable SOCKS port reached a different exit than the candidate")
 
-            await self.database.complete_switch(region_id, target_slot, node_id)
+            await self.database.complete_switch(
+                region_id,
+                target_slot,
+                node_id,
+                stable_probe.egress_ip,
+            )
             if active is not None:
                 self._schedule_drain_cleanup(
                     region_id,
@@ -416,7 +461,9 @@ class SwitchCoordinator:
                 )
             await self.database.add_event(
                 code="SWITCH_COMPLETED",
-                message=f"{region.name} switched to {stable_probe.egress_ip}",
+                message=f"{region.name} 已切换到出口 {stable_probe.egress_ip}",
+                region_id=region_id,
+                node_id=node_id,
                 details={
                     "slot": target_slot,
                     "node_id": node_id,
@@ -425,7 +472,7 @@ class SwitchCoordinator:
                     "latency_ms": stable_probe.latency_ms,
                 },
             )
-            await report(1.0, "Switch completed")
+            await report(1.0, "线路切换完成")
             return SwitchResult(
                 region_id=region_id,
                 node_id=node_id,
@@ -456,7 +503,9 @@ class SwitchCoordinator:
             await self.database.add_event(
                 code="SWITCH_ROLLED_BACK",
                 level="error",
-                message=f"{region.name} switch failed and was rolled back",
+                message=f"{region.name} 切换失败, 已恢复原线路",
+                region_id=region_id,
+                node_id=node_id,
                 details={"slot": target_slot, "node_id": node_id, "error_code": error_code},
             )
             raise

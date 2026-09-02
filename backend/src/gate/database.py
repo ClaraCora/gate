@@ -17,6 +17,8 @@ from sqlalchemy import (
     delete,
     event,
     func,
+    inspect,
+    or_,
     select,
 )
 from sqlalchemy.ext.asyncio import (
@@ -50,13 +52,16 @@ class RegionRecord(Base):
     __tablename__ = "regions"
 
     id: Mapped[str] = mapped_column(String(16), primary_key=True)
+    group_id: Mapped[str] = mapped_column(String(16), index=True)
     name: Mapped[str] = mapped_column(String(80))
     countries: Mapped[list[str]] = mapped_column(JSON)
     socks_port: Mapped[int] = mapped_column(Integer, unique=True)
+    network_index: Mapped[int] = mapped_column(Integer, unique=True)
     enabled: Mapped[bool] = mapped_column(default=True)
     mode: Mapped[str] = mapped_column(String(16), default=RegionMode.AUTO)
     status: Mapped[str] = mapped_column(String(24), default=RegionStatus.UNAVAILABLE)
     active_node_id: Mapped[int | None] = mapped_column(ForeignKey("nodes.id"), nullable=True)
+    active_egress_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
@@ -191,27 +196,55 @@ class Database:
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.close()
 
+    @staticmethod
+    def _migrate_schema(connection: Any) -> None:
+        inspector = inspect(connection)
+        if "regions" not in inspector.get_table_names():
+            return
+        columns = {column["name"] for column in inspector.get_columns("regions")}
+        additions = {
+            "group_id": "ALTER TABLE regions ADD COLUMN group_id VARCHAR(16)",
+            "network_index": "ALTER TABLE regions ADD COLUMN network_index INTEGER",
+            "active_egress_ip": "ALTER TABLE regions ADD COLUMN active_egress_ip VARCHAR(45)",
+        }
+        for name, statement in additions.items():
+            if name not in columns:
+                connection.exec_driver_sql(statement)
+
     async def initialize(self, regions: Sequence[RegionConfig]) -> None:
         from gate.network import slot_spec
 
         async with self.engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
+            await connection.run_sync(self._migrate_schema)
         async with self.sessions() as session, session.begin():
             for region in regions:
+                group_id = region.group_id or region.id
                 record = await session.get(RegionRecord, region.id)
                 if record is None:
                     session.add(
                         RegionRecord(
                             id=region.id,
+                            group_id=group_id,
                             name=region.name,
                             countries=list(region.countries),
                             socks_port=region.socks_port,
+                            network_index=region.network_index,
+                            enabled=region.enabled,
+                            mode=(RegionMode.AUTO if region.enabled else RegionMode.DISABLED),
+                            status=(
+                                RegionStatus.UNAVAILABLE
+                                if region.enabled
+                                else RegionStatus.DISABLED
+                            ),
                         )
                     )
                 else:
+                    record.group_id = group_id
                     record.name = region.name
                     record.countries = list(region.countries)
                     record.socks_port = region.socks_port
+                    record.network_index = region.network_index
                     record.updated_at = utc_now()
                 if await session.get(RegionSelectionRecord, region.id) is None:
                     session.add(RegionSelectionRecord(region_id=region.id))
@@ -311,11 +344,17 @@ class Database:
             for region in regions:
                 candidate_count = 0
                 if latest_observation is not None:
+                    sibling_nodes = select(RegionRecord.active_node_id).where(
+                        RegionRecord.group_id == region.group_id,
+                        RegionRecord.id != region.id,
+                        RegionRecord.active_node_id.is_not(None),
+                    )
                     candidate_count = int(
                         await session.scalar(
                             select(func.count(NodeRecord.id)).where(
                                 NodeRecord.country_code.in_(region.countries),
                                 NodeRecord.last_seen_at == latest_observation,
+                                NodeRecord.id.not_in(sibling_nodes),
                             )
                         )
                         or 0
@@ -330,6 +369,30 @@ class Database:
     async def get_node(self, node_id: int) -> NodeRecord | None:
         async with self.sessions() as session:
             return await session.get(NodeRecord, node_id)
+
+    async def get_active_conflict(
+        self,
+        region_id: str,
+        *,
+        node_id: int,
+        egress_ip: str | None = None,
+    ) -> RegionRecord | None:
+        async with self.sessions() as session:
+            region = await session.get(RegionRecord, region_id)
+            if region is None:
+                return None
+            conflicts = [RegionRecord.active_node_id == node_id]
+            if egress_ip is not None:
+                conflicts.append(RegionRecord.active_egress_ip == egress_ip)
+            record: RegionRecord | None = await session.scalar(
+                select(RegionRecord).where(
+                    RegionRecord.group_id == region.group_id,
+                    RegionRecord.id != region_id,
+                    RegionRecord.enabled.is_(True),
+                    or_(*conflicts),
+                )
+            )
+            return record
 
     async def get_active_slot(self, region_id: str) -> RegionSlotRecord | None:
         async with self.sessions() as session:
@@ -382,12 +445,31 @@ class Database:
             region.updated_at = utc_now()
             return region
 
-    async def complete_switch(self, region_id: str, slot: str, node_id: int) -> None:
+    async def complete_switch(
+        self,
+        region_id: str,
+        slot: str,
+        node_id: int,
+        egress_ip: str | None = None,
+    ) -> None:
         async with self.sessions() as session, session.begin():
             region = await session.get(RegionRecord, region_id)
             target = await session.get(RegionSlotRecord, (region_id, slot))
             if region is None or target is None:
                 raise ValueError(f"unknown region slot: {region_id}/{slot}")
+            conflict_conditions = [RegionRecord.active_node_id == node_id]
+            if egress_ip is not None:
+                conflict_conditions.append(RegionRecord.active_egress_ip == egress_ip)
+            conflict = await session.scalar(
+                select(RegionRecord.id).where(
+                    RegionRecord.group_id == region.group_id,
+                    RegionRecord.id != region_id,
+                    RegionRecord.enabled.is_(True),
+                    or_(*conflict_conditions),
+                )
+            )
+            if conflict is not None:
+                raise ValueError(f"active exit conflicts with sibling entry: {conflict}")
             slots = await session.scalars(
                 select(RegionSlotRecord).where(RegionSlotRecord.region_id == region_id)
             )
@@ -399,6 +481,7 @@ class Database:
             target.started_at = utc_now()
             target.last_verified_at = utc_now()
             region.active_node_id = node_id
+            region.active_egress_ip = egress_ip
             region.status = RegionStatus.HEALTHY
             region.updated_at = utc_now()
             selection = await session.get(RegionSelectionRecord, region_id)
@@ -423,6 +506,7 @@ class Database:
                     region = await session.get(RegionRecord, region_id)
                     if region is not None:
                         region.active_node_id = None
+                        region.active_egress_ip = None
                         region.status = RegionStatus.UNAVAILABLE
                         region.updated_at = utc_now()
 
@@ -441,11 +525,26 @@ class Database:
                 .where(
                     NodeRecord.country_code.in_(region.countries),
                     NodeRecord.last_seen_at == latest_observation,
+                    NodeRecord.id.not_in(
+                        select(RegionRecord.active_node_id).where(
+                            RegionRecord.group_id == region.group_id,
+                            RegionRecord.id != region_id,
+                            RegionRecord.active_node_id.is_not(None),
+                        )
+                    ),
                 )
                 .order_by(NodeRecord.api_score.desc(), NodeRecord.last_seen_at.desc())
                 .limit(limit)
             )
             return list(await session.scalars(statement))
+
+    async def set_active_egress_ip(self, region_id: str, egress_ip: str) -> None:
+        async with self.sessions() as session, session.begin():
+            region = await session.get(RegionRecord, region_id)
+            if region is None:
+                raise ValueError(f"unknown region: {region_id}")
+            region.active_egress_ip = egress_ip
+            region.updated_at = utc_now()
 
     async def record_probe(
         self,
@@ -605,7 +704,7 @@ class Database:
                 record.status = JobStatus.CANCELLED
                 record.progress = 1.0
                 record.error_code = "CANCELLED_BY_USER"
-                record.detail = {"message": "The job was cancelled by the operator."}
+                record.detail = {"message": "任务已由操作员取消。"}
                 record.updated_at = utc_now()
             return record
 
@@ -617,7 +716,7 @@ class Database:
             for record in records:
                 record.status = JobStatus.FAILED
                 record.error_code = "PROCESS_RESTARTED"
-                record.detail = {"message": "The API restarted before this job completed."}
+                record.detail = {"message": "API 重启, 任务未能完成。"}
                 record.updated_at = utc_now()
 
     async def cleanup_retention(

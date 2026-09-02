@@ -42,27 +42,95 @@ retention:
 
 regions:
   - id: jp
-    name: Japan
+    group_id: jp
+    name: 日本 01
     countries: [JP]
     socks_port: 11081
     network_index: 1
   - id: kr
-    name: Korea
+    group_id: kr
+    name: 韩国 01
     countries: [KR]
     socks_port: 11082
     network_index: 2
   - id: na
-    name: North America
+    group_id: na
+    name: 北美 01
     countries: [US, CA]
     socks_port: 11083
     network_index: 3
   - id: eu
-    name: Europe
+    group_id: eu
+    name: 欧洲 01
     countries: [DE, NL, FR, GB, RO, PL, ES, IT, SE, FI, CH, AT]
     socks_port: 11084
     network_index: 4
   - id: sea
-    name: Southeast Asia
+    group_id: sea
+    name: 东南亚 01
     countries: [SG, TH, VN, ID, MY, PH]
     socks_port: 11085
     network_index: 5
+  - id: jp-02
+    group_id: jp
+    name: 日本 02
+    countries: [JP]
+    socks_port: 11101
+    network_index: 6
+    enabled: false
+  - id: jp-03
+    group_id: jp
+    name: 日本 03
+    countries: [JP]
+    socks_port: 11102
+    network_index: 7
+    enabled: false
+  - id: jp-04
+    group_id: jp
+    name: 日本 04
+    countries: [JP]
+    socks_port: 11103
+    network_index: 8
+    enabled: false
+  - id: jp-05
+    group_id: jp
+    name: 日本 05
+    countries: [JP]
+    socks_port: 11104
+    network_index: 9
+    enabled: false
+  - id: jp-06
+    group_id: jp
+    name: 日本 06
+    countries: [JP]
+    socks_port: 11105
+    network_index: 10
+    enabled: false
+  - id: jp-07
+    group_id: jp
+    name: 日本 07
+    countries: [JP]
+    socks_port: 11106
+    network_index: 11
+    enabled: false
+  - id: jp-08
+    group_id: jp
+    name: 日本 08
+    countries: [JP]
+    socks_port: 11107
+    network_index: 12
+    enabled: false
+  - id: jp-09
+    group_id: jp
+    name: 日本 09
+    countries: [JP]
+    socks_port: 11108
+    network_index: 13
+    enabled: false
+  - id: jp-10
+    group_id: jp
+    name: 日本 10
+    countries: [JP]
+    socks_port: 11109
+    network_index: 14
+    enabled: false

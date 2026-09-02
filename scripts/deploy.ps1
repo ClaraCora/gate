@@ -22,10 +22,19 @@ try {
     try {
         if (-not $SkipTests) {
             & (Join-Path $PSScriptRoot "test.ps1")
+            if ($LASTEXITCODE -ne 0) {
+                throw "Project checks failed"
+            }
         }
         if (Test-Path -LiteralPath "frontend/package.json") {
             & npm --prefix frontend ci
+            if ($LASTEXITCODE -ne 0) {
+                throw "Failed to install frontend dependencies"
+            }
             & npm --prefix frontend run build
+            if ($LASTEXITCODE -ne 0) {
+                throw "Failed to build frontend"
+            }
         }
         & tar `
             --exclude=.git `

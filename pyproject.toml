@@ -36,6 +36,7 @@ dev = [
 gate-api = "gate.api:main"
 gate-worker = "gate.worker:main"
 gate-password-hash = "gate.security:hash_password_main"
+gate-render-haproxy = "gate.haproxy_config:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["backend/src/gate"]

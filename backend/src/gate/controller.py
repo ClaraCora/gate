@@ -55,7 +55,7 @@ class AutomationController:
             job.id,
             status=JobStatus.RUNNING,
             progress=0.1,
-            detail={"message": "Automatic operation started", "node_id": node_id},
+            detail={"message": "自动任务已开始", "node_id": node_id},
         )
         try:
             result = await operation()
@@ -74,14 +74,14 @@ class AutomationController:
                 status=JobStatus.FAILED,
                 progress=1.0,
                 error_code="AUTOMATION_INTERNAL_ERROR",
-                detail={"message": "Automatic operation failed unexpectedly", "node_id": node_id},
+                detail={"message": "自动任务发生意外错误", "node_id": node_id},
             )
             raise
         await self.database.update_job(
             job.id,
             status=JobStatus.SUCCEEDED,
             progress=1.0,
-            detail={"message": "Automatic operation completed", "node_id": node_id},
+            detail={"message": "自动任务已完成", "node_id": node_id},
         )
         return result
 
@@ -108,7 +108,7 @@ class AutomationController:
                 await self.database.add_event(
                     code="AUTO_CANDIDATE_FAILED",
                     level="warning",
-                    message=f"Automatic candidate failed for {region.name}",
+                    message=f"{region.name} 的自动候选节点切换失败",
                     region_id=region.id,
                     node_id=candidate.id,
                     details={"error_code": exc.code, "message": str(exc)},
@@ -120,7 +120,7 @@ class AutomationController:
         await self.database.add_event(
             code="AUTO_REGION_UNAVAILABLE",
             level="error",
-            message=f"No automatic candidate succeeded for {region.name}",
+            message=f"{region.name} 没有可用且不重复的自动候选节点",
             region_id=region.id,
             details={"attempted": attempted},
         )
@@ -133,7 +133,7 @@ class AutomationController:
             await self.database.add_event(
                 code="AUTOMATION_DISCOVERY_FAILED",
                 level="error",
-                message=str(exc),
+                message="自动刷新 VPN Gate 节点失败",
                 details={"error_code": exc.code},
             )
             return
@@ -173,7 +173,7 @@ class AutomationController:
                 await self.database.add_event(
                     code="ACTIVE_HEALTH_CHECK_FAILED",
                     level="warning",
-                    message=f"Active exit health check failed for {region.name}",
+                    message=f"{region.name} 的活动出口健康检查失败",
                     region_id=region.id,
                     details={
                         "failure_count": failures,
@@ -189,7 +189,7 @@ class AutomationController:
                         await self.database.add_event(
                             code="LOCKED_REGION_UNAVAILABLE",
                             level="error",
-                            message=f"Locked exit failed for {region.name}",
+                            message=f"{region.name} 已锁定的出口连续检查失败, 未自动切换",
                             region_id=region.id,
                             node_id=active.node_id if active is not None else None,
                             details={"failure_count": failures},
@@ -206,6 +206,7 @@ class AutomationController:
                         latency_ms=probe.latency_ms,
                         started_at=started_at,
                     )
+                    await self.database.set_active_egress_ip(region.id, probe.egress_ip)
                 self.failure_counts[region.id] = 0
 
     async def _optimize_region(self, region: RegionRecord) -> None:
@@ -275,7 +276,7 @@ class AutomationController:
         if not decision.should_switch:
             await self.database.add_event(
                 code="AUTO_OPTIMIZATION_PENDING",
-                message=f"{region.name} quality candidate is waiting for selection gates",
+                message=f"{region.name} 的优选节点正在等待确认轮次或冷却时间",
                 region_id=region.id,
                 node_id=best_node_id,
                 details={
@@ -297,7 +298,7 @@ class AutomationController:
             await self.database.add_event(
                 code="AUTO_OPTIMIZATION_FAILED",
                 level="warning",
-                message=f"{region.name} quality optimization failed",
+                message=f"{region.name} 的线路质量优化失败",
                 region_id=region.id,
                 node_id=best_node_id,
                 details={"error_code": exc.code, "message": str(exc)},
@@ -305,7 +306,7 @@ class AutomationController:
             return
         await self.database.add_event(
             code="AUTO_QUALITY_SWITCH",
-            message=f"{region.name} moved to a measurably better exit",
+            message=f"{region.name} 已自动切换到实测质量更高的出口",
             region_id=region.id,
             node_id=best_node_id,
             details={"previous_score": current_score, "candidate_score": best_score},
@@ -341,7 +342,7 @@ class AutomationController:
                 await self.database.add_event(
                     code="AUTOMATION_INTERNAL_ERROR",
                     level="error",
-                    message="An automation cycle failed unexpectedly",
+                    message="自动维护周期发生意外错误",
                 )
             await asyncio.sleep(interval_seconds)
 

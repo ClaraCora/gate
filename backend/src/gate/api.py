@@ -201,7 +201,7 @@ def create_app(
             job_id,
             status=JobStatus.RUNNING,
             progress=0.0,
-            detail={"message": "Switch job started", "node_id": node_id},
+            detail={"message": "线路切换任务已开始", "node_id": node_id},
         )
         try:
             result = await app_coordinator.switch(
@@ -225,7 +225,7 @@ def create_app(
                 status=JobStatus.FAILED,
                 progress=1.0,
                 error_code="UNEXPECTED_SWITCH_ERROR",
-                detail={"message": "Switch failed unexpectedly", "node_id": node_id},
+                detail={"message": "线路切换发生意外错误", "node_id": node_id},
             )
         else:
             await app_database.update_job(
@@ -233,7 +233,7 @@ def create_app(
                 status=JobStatus.SUCCEEDED,
                 progress=1.0,
                 detail={
-                    "message": "Switch completed",
+                    "message": "线路切换完成",
                     "node_id": node_id,
                     "slot": result.slot,
                     "egress_ip": result.egress_ip,
@@ -250,7 +250,7 @@ def create_app(
             job_id,
             status=JobStatus.RUNNING,
             progress=0.1,
-            detail={"message": "Testing the stable regional SOCKS port"},
+            detail={"message": "正在测试固定 SOCKS 端口"},
         )
         try:
             result = await probe_socks_exit(
@@ -272,7 +272,7 @@ def create_app(
                 status=JobStatus.SUCCEEDED,
                 progress=1.0,
                 detail={
-                    "message": "Exit test completed",
+                    "message": "出口测试完成",
                     "egress_ip": result.egress_ip,
                     "country_code": result.country_code,
                     "latency_ms": result.latency_ms,
@@ -292,7 +292,7 @@ def create_app(
             job_id,
             status=JobStatus.RUNNING,
             progress=0.0,
-            detail={"message": "Candidate test started", "node_id": node_id},
+            detail={"message": "候选节点测试已开始", "node_id": node_id},
         )
         try:
             result = await app_coordinator.probe_candidate(
@@ -316,7 +316,7 @@ def create_app(
                 status=JobStatus.FAILED,
                 progress=1.0,
                 error_code="UNEXPECTED_PROBE_ERROR",
-                detail={"message": "Candidate test failed unexpectedly", "node_id": node_id},
+                detail={"message": "候选节点测试发生意外错误", "node_id": node_id},
             )
         else:
             await app_database.update_job(
@@ -324,7 +324,7 @@ def create_app(
                 status=JobStatus.SUCCEEDED,
                 progress=1.0,
                 detail={
-                    "message": "Candidate test completed",
+                    "message": "候选节点测试完成",
                     "node_id": node_id,
                     "slot": result.slot,
                     "egress_ip": result.egress_ip,
@@ -408,13 +408,16 @@ def create_app(
         return [
             RegionResponse(
                 id=region.id,
+                group_id=region.group_id,
                 name=region.name,
                 countries=region.countries,
                 socks_port=region.socks_port,
+                network_index=region.network_index,
                 enabled=region.enabled,
                 mode=region.mode,
                 status=region.status,
                 active_node_id=region.active_node_id,
+                active_egress_ip=region.active_egress_ip,
                 candidate_count=candidate_count,
                 updated_at=region.updated_at,
             )
@@ -429,9 +432,22 @@ def create_app(
         region_id: str,
         limit: int = Query(default=100, ge=1, le=500),
     ) -> list[CandidateResponse]:
-        if await app_database.get_region(region_id) is None:
+        region = await app_database.get_region(region_id)
+        if region is None:
             raise HTTPException(status_code=404, detail="Region not found")
         records = await app_database.list_candidates(region_id, limit)
+        if region.active_node_id is not None:
+            active_index = next(
+                (index for index, node in enumerate(records) if node.id == region.active_node_id),
+                None,
+            )
+            if active_index is not None:
+                records.insert(0, records.pop(active_index))
+            else:
+                active_node = await app_database.get_node(region.active_node_id)
+                if active_node is not None:
+                    records.insert(0, active_node)
+            records = records[:limit]
         result: list[CandidateResponse] = []
         for node in records:
             metrics = await app_database.get_probe_metrics(region_id, node.id)
@@ -495,7 +511,7 @@ def create_app(
             await app_database.add_event(
                 code="DISCOVERY_FAILED",
                 level="error",
-                message=str(exc),
+                message="手动刷新 VPN Gate 节点失败",
                 details={"error_code": exc.code},
             )
             raise HTTPException(
@@ -606,13 +622,16 @@ def create_app(
         updated, candidate_count = next(item for item in records if item[0].id == region_id)
         return RegionResponse(
             id=updated.id,
+            group_id=updated.group_id,
             name=updated.name,
             countries=updated.countries,
             socks_port=updated.socks_port,
+            network_index=updated.network_index,
             enabled=updated.enabled,
             mode=updated.mode,
             status=updated.status,
             active_node_id=updated.active_node_id,
+            active_egress_ip=updated.active_egress_ip,
             candidate_count=candidate_count,
             updated_at=updated.updated_at,
         )

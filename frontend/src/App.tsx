@@ -27,11 +27,13 @@ import {
   TriangleAlert,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { ApiError, gateApi, setCsrfToken } from "./api";
 import { AnimatedList } from "./components/AnimatedList";
+import { countryFlag, countryNameZh } from "./countries";
+import { eventDescription, eventLevelLabel, eventTitle } from "./events";
 import type {
   Candidate,
   GateEvent,
@@ -50,6 +52,14 @@ const REGION_LABELS: Record<string, string> = {
   eu: "欧洲",
   sea: "东南亚",
 };
+
+function groupLabel(region: Region): string {
+  return REGION_LABELS[region.group_id] ?? countryNameZh(region.countries[0] ?? "", region.name);
+}
+
+function entryLabel(region: Region): string {
+  return region.name || groupLabel(region);
+}
 
 const STATUS_META: Record<
   RegionStatus,
@@ -101,14 +111,14 @@ function errorMessage(error: unknown): string {
 }
 
 function jobDescription(job: Job): string {
-  if (!job.error_code) return String(job.detail.message ?? job.status);
+  if (!job.error_code) return String(job.detail.message ?? JOB_STATUS_LABELS[job.status] ?? "状态已更新");
   const suggestions: Record<string, string> = {
     WORKER_CLIENT_ERROR: "网络 worker 不可用，请检查 gate-worker 服务",
     PROBE_FAILED: "出口验证失败，请重试或改测其他节点",
     SWITCH_FAILED: "线路未通过切换验证，活动出口保持不变",
     PROCESS_RESTARTED: "控制进程曾重启，请重新提交任务",
   };
-  return `${job.error_code} · ${suggestions[job.error_code] ?? "任务失败，请查看事件记录"}`;
+  return suggestions[job.error_code] ?? "任务失败, 请查看事件记录";
 }
 
 function StatusBadge({ status }: { status: RegionStatus }) {
@@ -235,7 +245,7 @@ function PortRail({
               >
                 <span className={`port-node__lamp port-node__lamp--${meta.tone}`} />
                 <strong>{region.socks_port}</strong>
-                <small>{REGION_LABELS[region.id] ?? region.name}</small>
+                <small>{entryLabel(region)}</small>
               </button>
             </div>
           );
@@ -277,6 +287,8 @@ function RegionTable({
   jobs,
   selectedId,
   onSelect,
+  onToggle,
+  modePendingRegionId,
   runtimeUnavailable,
 }: {
   regions: Region[];
@@ -284,45 +296,108 @@ function RegionTable({
   jobs: Job[];
   selectedId: string | null;
   onSelect: (id: string) => void;
+  onToggle: (region: Region) => void;
+  modePendingRegionId: string | null;
   runtimeUnavailable: boolean;
 }) {
+  const grouped = new Map<string, Region[]>();
+  for (const region of regions) {
+    const entries = grouped.get(region.group_id) ?? [];
+    entries.push(region);
+    grouped.set(region.group_id, entries);
+  }
+  const groups = Array.from(grouped.entries());
   return (
     <div className="region-table-wrap">
       <table className="region-table">
         <thead>
           <tr>
-            <th>地区 / 端口</th><th>模式</th><th>线路状态</th><th>A/B 数据面</th><th>候选</th><th>更新时间</th>
+            <th>地区 / 端口</th><th>出口</th><th>线路状态</th><th>A/B 数据面</th><th>候选</th><th>更新时间</th>
           </tr>
         </thead>
         <tbody>
-          {regions.map((region) => {
-            const activeJob = jobs.find((job) => job.region_id === region.id && ["queued", "running"].includes(job.status));
+          {groups.map(([groupId, entries]) => {
+            const first = entries[0];
+            const enabledCount = entries.filter((entry) => entry.mode !== "disabled").length;
             return (
-              <tr
-                className={selectedId === region.id ? "is-selected" : ""}
-                key={region.id}
-                onClick={() => onSelect(region.id)}
-              >
-                <td>
-                  <button className="region-name" onClick={() => onSelect(region.id)} type="button">
-                    <strong>{REGION_LABELS[region.id] ?? region.name}</strong>
-                    <span>{region.socks_port}</span>
-                  </button>
-                </td>
-                <td><span className="mode-label">{MODE_LABELS[region.mode]}</span></td>
-                <td>
-                  <StatusBadge status={region.status} />
-                  {activeJob ? <span className="job-inline">{Math.round(activeJob.progress * 100)}%</span> : null}
-                </td>
-                <td><SlotPair slots={slots.filter((slot) => slot.region_id === region.id)} unavailable={runtimeUnavailable} /></td>
-                <td><span className="numeric">{region.candidate_count}</span></td>
-                <td><time dateTime={region.updated_at}>{formatTime(region.updated_at)}</time></td>
-              </tr>
+              <Fragment key={groupId}>
+                <tr className="region-group-row">
+                  <th colSpan={6} scope="rowgroup">
+                    <span className="region-group-content">
+                      <span aria-label={groupLabel(first)} className="region-group-flag" role="img">{countryFlag(first.countries[0] ?? "")}</span>
+                      <strong>{groupLabel(first)}</strong>
+                      <span>{entries.length} 个入口 · {enabledCount} 个已开启</span>
+                    </span>
+                  </th>
+                </tr>
+                {entries.map((region) => {
+                  const activeJob = jobs.find((job) => job.region_id === region.id && ["queued", "running"].includes(job.status));
+                  return (
+                    <tr
+                      className={`${selectedId === region.id ? "is-selected" : ""} ${region.mode === "disabled" ? "is-disabled" : ""}`}
+                      key={region.id}
+                      onClick={() => onSelect(region.id)}
+                    >
+                      <td>
+                        <button className="region-name" onClick={() => onSelect(region.id)} type="button">
+                          <strong>{entryLabel(region)}</strong>
+                          <span>127.0.0.1:{region.socks_port}</span>
+                        </button>
+                      </td>
+                      <td onClick={(event) => event.stopPropagation()}>
+                        <RegionToggle
+                          disabled={modePendingRegionId === region.id || Boolean(activeJob)}
+                          enabled={region.mode !== "disabled"}
+                          label={region.mode === "disabled" ? "已关闭" : MODE_LABELS[region.mode]}
+                          name={entryLabel(region)}
+                          onToggle={() => onToggle(region)}
+                        />
+                      </td>
+                      <td>
+                        <StatusBadge status={region.status} />
+                        {activeJob ? <span className="job-inline">{Math.round(activeJob.progress * 100)}%</span> : null}
+                      </td>
+                      <td><SlotPair slots={slots.filter((slot) => slot.region_id === region.id)} unavailable={runtimeUnavailable} /></td>
+                      <td><span className="numeric">{region.candidate_count}</span></td>
+                      <td><time dateTime={region.updated_at}>{formatTime(region.updated_at)}</time></td>
+                    </tr>
+                  );
+                })}
+              </Fragment>
             );
           })}
         </tbody>
       </table>
     </div>
+  );
+}
+
+function RegionToggle({
+  enabled,
+  disabled,
+  label,
+  name,
+  onToggle,
+}: {
+  enabled: boolean;
+  disabled: boolean;
+  label: string;
+  name: string;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      aria-checked={enabled}
+      aria-label={`${enabled ? "关闭" : "开启"}${name}出口`}
+      className="route-toggle"
+      disabled={disabled}
+      onClick={onToggle}
+      role="switch"
+      type="button"
+    >
+      <span aria-hidden="true" className="route-toggle__track"><i /></span>
+      <span className="route-toggle__label">{label}</span>
+    </button>
   );
 }
 
@@ -337,7 +412,7 @@ function ModeControl({
 }) {
   return (
     <div aria-label="地区运行模式" className="segmented" role="group">
-      {(["auto", "locked", "disabled"] as const).map((mode) => (
+      {(["auto", "locked"] as const).map((mode) => (
         <button
           aria-pressed={value === mode}
           disabled={disabled}
@@ -345,7 +420,7 @@ function ModeControl({
           onClick={() => onChange(mode)}
           type="button"
         >
-          {mode === "auto" ? <RotateCcw size={14} /> : mode === "locked" ? <LockKeyhole size={14} /> : <ShieldOff size={14} />}
+          {mode === "auto" ? <RotateCcw size={14} /> : <LockKeyhole size={14} />}
           {MODE_LABELS[mode]}
         </button>
       ))}
@@ -363,6 +438,7 @@ function RegionInspector({
   reconnectPending,
   runtimeUnavailable,
   onMode,
+  onToggle,
   onProbe,
   onReconnect,
 }: {
@@ -375,13 +451,14 @@ function RegionInspector({
   reconnectPending: boolean;
   runtimeUnavailable: boolean;
   onMode: (mode: RegionMode) => void;
+  onToggle: () => void;
   onProbe: () => void;
   onReconnect: () => void;
 }) {
   return (
     <aside className="inspector" aria-labelledby="inspector-title">
       <div className="inspector__heading">
-        <div><h2 id="inspector-title">{REGION_LABELS[region.id] ?? region.name}</h2><span className="port-address">127.0.0.1:{region.socks_port}</span></div>
+        <div><h2 id="inspector-title">{entryLabel(region)}</h2><span className="port-address">127.0.0.1:{region.socks_port} · {groupLabel(region)}</span></div>
         <StatusBadge status={region.status} />
       </div>
       <div className="route-trace" aria-label="当前路由">
@@ -389,12 +466,15 @@ function RegionInspector({
         <span className="route-wire"><i /></span>
         <div className="route-switch"><ArrowLeftRight size={18} /><small>A / B</small></div>
         <span className={`route-wire ${region.status === "healthy" ? "route-wire--live" : ""}`}><i /></span>
-        <div className="route-endpoint route-endpoint--exit"><span>EXIT</span><strong>{activeCandidate?.country_code ?? "--"}</strong></div>
+        <div className="route-endpoint route-endpoint--exit"><span>出口</span><strong>{activeCandidate ? countryFlag(activeCandidate.country_code) : "--"}</strong></div>
       </div>
       <dl className="signal-grid">
         <div><dt>当前节点</dt><dd>{activeCandidate?.ip ?? (region.active_node_id ? `#${region.active_node_id}` : "未连接")}</dd></div>
+        <div><dt>实际出口</dt><dd>{region.active_egress_ip ?? "--"}</dd></div>
         <div><dt>VPN 端点</dt><dd>{activeCandidate ? `${activeCandidate.transport.toUpperCase()} / ${activeCandidate.port}` : "--"}</dd></div>
         <div><dt>API 延迟</dt><dd>{activeCandidate?.api_ping_ms != null ? `${activeCandidate.api_ping_ms} ms` : "--"}</dd></div>
+        <div><dt>出口国家</dt><dd>{activeCandidate ? countryNameZh(activeCandidate.country_code, activeCandidate.country_long) : "--"}</dd></div>
+        <div><dt>线路评分</dt><dd>{activeCandidate?.quality_score != null ? activeCandidate.quality_score.toFixed(1) : "--"}</dd></div>
         <div><dt>候选线路</dt><dd>{region.candidate_count}</dd></div>
       </dl>
       <SlotPair slots={slots} unavailable={runtimeUnavailable} />
@@ -405,7 +485,17 @@ function RegionInspector({
         </div>
       ) : null}
       <div className="inspector__controls">
-        <ModeControl disabled={modePending || Boolean(activeJob)} onChange={onMode} value={region.mode} />
+        <div className="region-power-row">
+          <div><strong>入口开关</strong><span>{region.mode === "disabled" ? "端口停止转发" : "端口正在服务"}</span></div>
+          <RegionToggle
+            disabled={modePending || Boolean(activeJob)}
+            enabled={region.mode !== "disabled"}
+            label={region.mode === "disabled" ? "已关闭" : "已开启"}
+            name={entryLabel(region)}
+            onToggle={onToggle}
+          />
+        </div>
+        <ModeControl disabled={modePending || Boolean(activeJob) || region.mode === "disabled"} onChange={onMode} value={region.mode} />
         <div className="inspector__actions">
           <button className="button button--primary" disabled={probePending || !["healthy", "degraded"].includes(region.status) || Boolean(activeJob)} onClick={onProbe} type="button">
             {probePending ? <LoaderCircle className="spin" size={16} /> : <Gauge size={16} />}
@@ -437,8 +527,8 @@ function CandidateTable({
   if (candidates.length === 0) {
     return (
       <div className="empty-state">
-        <Radio size={24} /><strong>当前地区没有候选节点</strong>
-        <span>刷新 VPN Gate 列表；若目标国家仍无节点，端口会保持不可用。</span>
+        <Radio size={24} /><strong>当前入口没有可用候选节点</strong>
+        <span>同地区其他入口已使用的节点不会重复显示。可刷新节点列表或暂时关闭此入口。</span>
       </div>
     );
   }
@@ -451,7 +541,15 @@ function CandidateTable({
             const active = candidate.id === activeNodeId;
             return (
               <tr className={active ? "is-active" : ""} key={candidate.id}>
-                <td><div className="candidate-id"><span className="country-tag">{candidate.country_code}</span><span><strong>{candidate.ip}</strong><small>{candidate.hostname}</small></span></div></td>
+                <td>
+                  <div className="candidate-id">
+                    <span className="country-identity" title={candidate.country_code}>
+                      <span aria-label={countryNameZh(candidate.country_code, candidate.country_long)} className="country-flag" role="img">{countryFlag(candidate.country_code)}</span>
+                      <small>{countryNameZh(candidate.country_code, candidate.country_long)}</small>
+                    </span>
+                    <span><strong>{candidate.ip}</strong><small>{candidate.hostname}</small></span>
+                  </div>
+                </td>
                 <td><span className="protocol">{candidate.transport.toUpperCase()}</span> {candidate.port}</td>
                 <td><div className="metric-pair"><strong>{candidate.measured_latency_ms != null ? `实测 ${Math.round(candidate.measured_latency_ms)} ms` : candidate.api_ping_ms != null ? `API ${candidate.api_ping_ms} ms` : "--"}</strong><span>{candidate.quality_score != null ? `评分 ${candidate.quality_score.toFixed(1)} · 成功 ${Math.round((candidate.availability_24h ?? 0) * 100)}%` : formatSpeed(candidate.api_speed_bps)}</span></div></td>
                 <td>{candidate.sessions} 会话</td>
@@ -471,21 +569,41 @@ function CandidateTable({
   );
 }
 
-function JobsView({ jobs, cancellingId, onCancel }: { jobs: Job[]; cancellingId: string | null; onCancel: (jobId: string) => void }) {
+const JOB_KIND_LABELS: Record<string, string> = {
+  switch: "线路切换",
+  candidate_probe: "候选测试",
+  probe: "出口测试",
+  reconnect: "重新连接",
+  auto_switch: "自动接入",
+  auto_candidate_probe: "自动候选测试",
+  auto_quality_switch: "自动质量切换",
+};
+
+const JOB_STATUS_LABELS: Record<string, string> = {
+  queued: "等待中",
+  running: "执行中",
+  succeeded: "已完成",
+  failed: "失败",
+  cancelled: "已取消",
+};
+
+function JobsView({ jobs, regions, cancellingId, onCancel }: { jobs: Job[]; regions: Region[]; cancellingId: string | null; onCancel: (jobId: string) => void }) {
+  const names = new Map(regions.map((region) => [region.id, entryLabel(region)]));
   return (
     <div className="timeline-list">
       {jobs.length === 0 ? <div className="empty-state"><ServerCog size={24} /><strong>还没有控制任务</strong><span>测速或切换操作会在这里留下持久进度和结果。</span></div> : jobs.map((job) => (
         <article className="timeline-row" key={job.id}>
           <span className={`timeline-mark timeline-mark--${job.status}`} />
-          <div><strong>{job.kind === "switch" ? "线路切换" : job.kind === "candidate_probe" ? "候选测试" : job.kind === "probe" ? "出口测试" : job.kind}</strong><span>{job.region_id ? REGION_LABELS[job.region_id] ?? job.region_id : "系统"} · {jobDescription(job)}</span></div>
-          <div className="timeline-result"><span>{job.status}</span><time>{formatTime(job.updated_at)}</time>{["queued", "running"].includes(job.status) ? <button aria-label={`取消任务 ${job.id}`} className="icon-button" disabled={cancellingId === job.id} onClick={() => onCancel(job.id)} title="取消任务" type="button">{cancellingId === job.id ? <LoaderCircle className="spin" size={15} /> : <X size={15} />}</button> : null}</div>
+          <div><strong>{JOB_KIND_LABELS[job.kind] ?? "系统任务"}</strong><span>{job.region_id ? names.get(job.region_id) ?? "未知入口" : "系统"} · {jobDescription(job)}</span></div>
+          <div className="timeline-result"><span>{JOB_STATUS_LABELS[job.status] ?? "未知状态"}</span><time>{formatTime(job.updated_at)}</time>{["queued", "running"].includes(job.status) ? <button aria-label={`取消任务 ${job.id}`} className="icon-button" disabled={cancellingId === job.id} onClick={() => onCancel(job.id)} title="取消任务" type="button">{cancellingId === job.id ? <LoaderCircle className="spin" size={15} /> : <X size={15} />}</button> : null}</div>
         </article>
       ))}
     </div>
   );
 }
 
-function EventsView({ events }: { events: GateEvent[] }) {
+function EventsView({ events, regions }: { events: GateEvent[]; regions: Region[] }) {
+  const names = new Map(regions.map((region) => [region.id, entryLabel(region)]));
   return (
     <AnimatedList
       className="timeline-list"
@@ -495,8 +613,8 @@ function EventsView({ events }: { events: GateEvent[] }) {
       renderItem={(event) => (
         <article className="timeline-row">
           <span className={`timeline-mark timeline-mark--${event.level}`} />
-          <div><strong>{event.code}</strong><span>{event.message}</span></div>
-          <div className="timeline-result"><span>{event.level}</span><time>{formatTime(event.created_at)}</time></div>
+          <div><strong>{eventTitle(event.code)}</strong><span>{event.region_id ? `${names.get(event.region_id) ?? "未知入口"} · ` : ""}{eventDescription(event)}</span></div>
+          <div className="timeline-result"><span>{eventLevelLabel(event.level)}</span><time>{formatTime(event.created_at)}</time></div>
         </article>
       )}
     />
@@ -515,7 +633,7 @@ function SwitchDialog({ candidate, region, busy, onCancel, onConfirm }: { candid
       <div className="dialog-heading"><div><ArrowLeftRight size={20} /><h2>切换地区出口</h2></div><button aria-label="关闭" className="icon-button" disabled={busy} onClick={onCancel} type="button"><X size={18} /></button></div>
       <p>Gate 会在备用 slot 建立隧道并验证出口国家。只有验证成功，固定端口才会切到新线路。</p>
       <dl className="dialog-route">
-        <div><dt>地区</dt><dd>{region ? REGION_LABELS[region.id] ?? region.name : "--"}</dd></div>
+        <div><dt>入口</dt><dd>{region ? entryLabel(region) : "--"}</dd></div>
         <div><dt>固定端口</dt><dd>{region?.socks_port ?? "--"}</dd></div>
         <div><dt>候选节点</dt><dd>{candidate?.ip ?? "--"}</dd></div>
         <div><dt>VPN 端点</dt><dd>{candidate ? `${candidate.transport.toUpperCase()} / ${candidate.port}` : "--"}</dd></div>
@@ -525,10 +643,46 @@ function SwitchDialog({ candidate, region, busy, onCancel, onConfirm }: { candid
   );
 }
 
+function DisableRegionDialog({
+  region,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  region: Region | null;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const ref = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    const dialog = ref.current;
+    if (region && dialog && !dialog.open) dialog.showModal();
+    if (!region && dialog?.open) dialog.close();
+  }, [region]);
+  return (
+    <dialog className="switch-dialog" onCancel={(event) => { event.preventDefault(); if (!busy) onCancel(); }} ref={ref}>
+      <div className="dialog-heading">
+        <div><ShieldOff size={20} /><h2>关闭{region ? entryLabel(region) : "当前入口"}</h2></div>
+        <button aria-label="关闭" className="icon-button" disabled={busy} onClick={onCancel} type="button"><X size={18} /></button>
+      </div>
+      <p>固定端口 {region?.socks_port ?? "--"} 将停止转发，当前 OpenVPN 和 SOCKS 运行槽会被清理。候选数据与历史记录仍会保留。</p>
+      <div className="dialog-actions">
+        <button className="button button--secondary" disabled={busy} onClick={onCancel} type="button">取消</button>
+        <button className="button button--danger" disabled={busy} onClick={onConfirm} type="button">
+          {busy ? <LoaderCircle className="spin" size={16} /> : <ShieldOff size={16} />}
+          {busy ? "正在关闭" : "关闭出口"}
+        </button>
+      </div>
+    </dialog>
+  );
+}
+
 function ConsoleView({ session, onLogout }: { session: SessionState; onLogout: () => void }) {
   const queryClient = useQueryClient();
   const [params, setParams] = useSearchParams();
   const [switchTarget, setSwitchTarget] = useState<Candidate | null>(null);
+  const [disableTarget, setDisableTarget] = useState<Region | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const streamState = useGateStream(session.authenticated);
   const regionsQuery = useQuery({ queryKey: ["regions"], queryFn: gateApi.regions, refetchInterval: 10_000 });
@@ -565,7 +719,20 @@ function ConsoleView({ session, onLogout }: { session: SessionState; onLogout: (
   });
   const modeMutation = useMutation({
     mutationFn: ({ regionId, mode }: { regionId: string; mode: RegionMode }) => gateApi.setMode(regionId, mode),
-    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["regions"] }),
+    onSuccess: (updated, variables) => {
+      setDisableTarget(null);
+      setNotice(
+        variables.mode === "disabled"
+          ? `${entryLabel(updated)}已关闭`
+          : variables.mode === "auto"
+            ? `${entryLabel(updated)}已开启并进入自动模式`
+            : `${entryLabel(updated)}已锁定当前线路`,
+      );
+      void queryClient.invalidateQueries({ queryKey: ["regions"] });
+      void queryClient.invalidateQueries({ queryKey: ["slots"] });
+      void queryClient.invalidateQueries({ queryKey: ["events"] });
+    },
+    onError: () => setDisableTarget(null),
   });
   const candidateProbeMutation = useMutation({
     mutationFn: ({ regionId, nodeId }: { regionId: string; nodeId: number }) => gateApi.probeCandidate(regionId, nodeId),
@@ -598,9 +765,17 @@ function ConsoleView({ session, onLogout }: { session: SessionState; onLogout: (
   });
 
   const mutationError = refreshMutation.error ?? probeMutation.error ?? candidateProbeMutation.error ?? modeMutation.error ?? switchMutation.error ?? reconnectMutation.error ?? cancelMutation.error;
-  const liveRegions = useMemo(() => regions.filter((region) => region.status === "healthy").length, [regions]);
+  const enabledRegions = useMemo(() => regions.filter((region) => region.mode !== "disabled"), [regions]);
+  const liveRegions = useMemo(() => enabledRegions.filter((region) => region.status === "healthy").length, [enabledRegions]);
   const selectRegion = (id: string) => setParams((current) => { current.set("region", id); return current; });
   const selectTab = (value: string) => setParams((current) => { current.set("view", value); return current; });
+  const toggleRegion = (region: Region) => {
+    if (region.mode === "disabled") {
+      modeMutation.mutate({ regionId: region.id, mode: "auto" });
+    } else {
+      setDisableTarget(region);
+    }
+  };
 
   return (
     <div className="app-shell">
@@ -608,7 +783,7 @@ function ConsoleView({ session, onLogout }: { session: SessionState; onLogout: (
         <div className="brand-lockup brand-lockup--bar"><span className="brand-mark"><Network size={20} /></span><span>GATE</span><small>出口控制台</small></div>
         <div className="command-status">
           <span className={`stream-state stream-state--${streamState}`}><i />{streamState === "live" ? "事件流在线" : streamState === "connecting" ? "连接事件流" : "事件流重连中"}</span>
-          <span className="system-count"><ShieldCheck size={15} />{liveRegions}/{regions.length || 5} 地区健康</span>
+          <span className="system-count"><ShieldCheck size={15} />{liveRegions}/{enabledRegions.length} 个已启用入口健康</span>
         </div>
         <div className="command-actions">
           <button className="button button--dark" disabled={refreshMutation.isPending} onClick={() => refreshMutation.mutate()} type="button">{refreshMutation.isPending ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}{refreshMutation.isPending ? "正在发现" : "刷新节点"}</button>
@@ -624,10 +799,10 @@ function ConsoleView({ session, onLogout }: { session: SessionState; onLogout: (
           {(notice || mutationError) ? <div className={`notice ${mutationError ? "notice--error" : ""}`} role={mutationError ? "alert" : "status"}><span>{mutationError ? <CircleAlert size={16} /> : <CircleCheck size={16} />}{mutationError ? errorMessage(mutationError) : notice}</span><button aria-label="关闭通知" className="icon-button" onClick={() => { setNotice(null); refreshMutation.reset(); probeMutation.reset(); candidateProbeMutation.reset(); modeMutation.reset(); switchMutation.reset(); reconnectMutation.reset(); cancelMutation.reset(); }} type="button"><X size={15} /></button></div> : null}
           <main className="workspace">
             <section className="routes-panel" aria-labelledby="routes-title">
-              <div className="section-heading"><div><h1 id="routes-title">地区线路</h1><p>固定入口保持不变，活动出口只在验证通过后接入。</p></div><span className="last-sync"><Clock3 size={14} />{formatTime(regions[0]?.updated_at)}</span></div>
-              <RegionTable jobs={jobs} onSelect={selectRegion} regions={regions} runtimeUnavailable={slotsQuery.isError} selectedId={selectedId} slots={slots} />
+              <div className="section-heading"><div><h1 id="routes-title">地区入口</h1><p>同一地区可开启多个固定端口, 每个端口使用互不重复的真实出口。</p></div><span className="last-sync"><Clock3 size={14} />{formatTime(regions[0]?.updated_at)}</span></div>
+              <RegionTable jobs={jobs} modePendingRegionId={modeMutation.isPending ? modeMutation.variables?.regionId ?? null : null} onSelect={selectRegion} onToggle={toggleRegion} regions={regions} runtimeUnavailable={slotsQuery.isError} selectedId={selectedId} slots={slots} />
             </section>
-            {selectedRegion ? <RegionInspector activeCandidate={activeCandidate} activeJob={activeJob} modePending={modeMutation.isPending} onMode={(mode) => modeMutation.mutate({ regionId: selectedRegion.id, mode })} onProbe={() => probeMutation.mutate(selectedRegion.id)} onReconnect={() => reconnectMutation.mutate(selectedRegion.id)} probePending={probeMutation.isPending} reconnectPending={reconnectMutation.isPending} region={selectedRegion} runtimeUnavailable={slotsQuery.isError} slots={selectedSlots} /> : null}
+            {selectedRegion ? <RegionInspector activeCandidate={activeCandidate} activeJob={activeJob} modePending={modeMutation.isPending && modeMutation.variables?.regionId === selectedRegion.id} onMode={(mode) => modeMutation.mutate({ regionId: selectedRegion.id, mode })} onProbe={() => probeMutation.mutate(selectedRegion.id)} onReconnect={() => reconnectMutation.mutate(selectedRegion.id)} onToggle={() => toggleRegion(selectedRegion)} probePending={probeMutation.isPending} reconnectPending={reconnectMutation.isPending} region={selectedRegion} runtimeUnavailable={slotsQuery.isError} slots={selectedSlots} /> : null}
           </main>
           <section className="detail-bay">
             <div className="detail-tabs" role="tablist" aria-label="线路详情">
@@ -636,12 +811,13 @@ function ConsoleView({ session, onLogout }: { session: SessionState; onLogout: (
               <button aria-selected={tab === "events"} onClick={() => selectTab("events")} role="tab" type="button"><Activity size={15} />事件 <span>{eventsQuery.data?.length ?? 0}</span></button>
             </div>
             <div className="detail-content" role="tabpanel">
-              {tab === "candidates" ? (candidatesQuery.isLoading ? <SkeletonRows count={5} /> : <CandidateTable activeNodeId={selectedRegion?.active_node_id ?? null} busy={Boolean(activeJob) || switchMutation.isPending || candidateProbeMutation.isPending} candidates={candidates} onProbe={(candidate) => { if (selectedRegion) candidateProbeMutation.mutate({ regionId: selectedRegion.id, nodeId: candidate.id }); }} onSwitch={setSwitchTarget} />) : tab === "jobs" ? <JobsView cancellingId={cancelMutation.isPending ? cancelMutation.variables ?? null : null} jobs={jobs} onCancel={(jobId) => cancelMutation.mutate(jobId)} /> : <EventsView events={eventsQuery.data ?? []} />}
+              {tab === "candidates" ? (candidatesQuery.isLoading ? <SkeletonRows count={5} /> : <CandidateTable activeNodeId={selectedRegion?.active_node_id ?? null} busy={selectedRegion?.mode === "disabled" || Boolean(activeJob) || switchMutation.isPending || candidateProbeMutation.isPending} candidates={candidates} onProbe={(candidate) => { if (selectedRegion) candidateProbeMutation.mutate({ regionId: selectedRegion.id, nodeId: candidate.id }); }} onSwitch={setSwitchTarget} />) : tab === "jobs" ? <JobsView cancellingId={cancelMutation.isPending ? cancelMutation.variables ?? null : null} jobs={jobs} onCancel={(jobId) => cancelMutation.mutate(jobId)} regions={regions} /> : <EventsView events={eventsQuery.data ?? []} regions={regions} />}
             </div>
           </section>
         </>
       )}
       <SwitchDialog busy={switchMutation.isPending} candidate={switchTarget} onCancel={() => setSwitchTarget(null)} onConfirm={() => { if (selectedRegion && switchTarget) switchMutation.mutate({ regionId: selectedRegion.id, nodeId: switchTarget.id }); }} region={selectedRegion} />
+      <DisableRegionDialog busy={modeMutation.isPending && modeMutation.variables?.mode === "disabled"} onCancel={() => setDisableTarget(null)} onConfirm={() => { if (disableTarget) modeMutation.mutate({ regionId: disableTarget.id, mode: "disabled" }); }} region={disableTarget} />
     </div>
   );
 }

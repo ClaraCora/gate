@@ -203,6 +203,91 @@ async def test_candidates_only_include_latest_discovery_batch(
 
 
 @pytest.mark.asyncio
+async def test_candidate_api_keeps_stale_active_node_visible(
+    tmp_path: Path, encoded_profile: str
+) -> None:
+    settings = _settings(tmp_path / "active-visible.db")
+    database = Database(settings.database.url)
+    second_profile = base64.b64encode(
+        base64.b64decode(encoded_profile).decode().replace(" 1195", " 1196").encode()
+    ).decode()
+    profiles = iter((encoded_profile, second_profile))
+
+    async def fetcher() -> FeedParseResult:
+        return FeedParseResult(nodes=(_node(next(profiles)),), rejected_rows=0, warnings=())
+
+    discovery = DiscoveryService(database, feed_url="unused", fetcher=fetcher)
+    app = create_app(
+        settings,
+        database=database,
+        discovery=discovery,
+        worker_health=HealthyWorker(),
+        reconcile_on_startup=False,
+        automation_on_startup=False,
+    )
+
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            await client.post("/api/v1/discovery/refresh", headers=MUTATION_HEADERS)
+            active = (await client.get("/api/v1/regions/jp/candidates")).json()[0]
+            await database.complete_switch("jp", "a", active["id"])
+            await client.post("/api/v1/discovery/refresh", headers=MUTATION_HEADERS)
+            regions = await client.get("/api/v1/regions")
+            candidates = await client.get("/api/v1/regions/jp/candidates")
+
+    japan = next(region for region in regions.json() if region["id"] == "jp")
+    assert japan["candidate_count"] == 1
+    assert [candidate["port"] for candidate in candidates.json()] == [1195, 1196]
+    assert candidates.json()[0]["id"] == active["id"]
+
+
+@pytest.mark.asyncio
+async def test_sibling_entries_exclude_active_node_and_reject_duplicate_egress(
+    tmp_path: Path, encoded_profile: str
+) -> None:
+    settings = _settings(tmp_path / "siblings.db")
+    database = Database(settings.database.url)
+    second_profile = base64.b64encode(
+        base64.b64decode(encoded_profile).decode().replace(" 1195", " 1196").encode()
+    ).decode()
+
+    async def fetcher() -> FeedParseResult:
+        return FeedParseResult(
+            nodes=(_node(encoded_profile), _node(second_profile)),
+            rejected_rows=0,
+            warnings=(),
+        )
+
+    discovery = DiscoveryService(database, feed_url="unused", fetcher=fetcher)
+    app = create_app(
+        settings,
+        database=database,
+        discovery=discovery,
+        worker_health=HealthyWorker(),
+        reconcile_on_startup=False,
+        automation_on_startup=False,
+    )
+
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            await client.post("/api/v1/discovery/refresh", headers=MUTATION_HEADERS)
+            japan = (await client.get("/api/v1/regions/jp/candidates")).json()
+            await database.complete_switch("jp", "a", japan[0]["id"], "203.0.113.10")
+            sibling = (await client.get("/api/v1/regions/jp-02/candidates")).json()
+
+            assert [item["id"] for item in sibling] == [japan[1]["id"]]
+            with pytest.raises(ValueError, match="conflicts with sibling"):
+                await database.complete_switch(
+                    "jp-02",
+                    "a",
+                    japan[1]["id"],
+                    "203.0.113.10",
+                )
+
+
+@pytest.mark.asyncio
 async def test_unknown_region_returns_not_found(tmp_path: Path) -> None:
     settings = _settings(tmp_path / "missing.db")
     app = create_app(

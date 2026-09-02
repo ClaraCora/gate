@@ -80,7 +80,7 @@ class DiscoveryService:
         )
         await self.database.add_event(
             code="DISCOVERY_COMPLETED",
-            message=f"Discovery accepted {summary.accepted} VPN Gate nodes",
+            message=f"节点刷新完成, 已接收 {summary.accepted} 个 VPN Gate 节点",
             details={
                 "discovered": summary.discovered,
                 "accepted": summary.accepted,

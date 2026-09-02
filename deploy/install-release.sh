@@ -122,12 +122,16 @@ printf 'GATE_PUBLIC_INTERFACE=%s\n' "$public_interface" >/etc/gate/firewall.env
 chown root:gate-worker /etc/gate/firewall.env
 chmod 0640 /etc/gate/firewall.env
 
-haproxy -c -f "$TARGET/deploy/haproxy/haproxy.cfg"
+haproxy_temp="/etc/haproxy/.gate-$RELEASE_ID-$$.cfg"
+GATE_CONFIG=/etc/gate/config.yaml "$TARGET/.venv/bin/gate-render-haproxy" \
+    --config /etc/gate/config.yaml --output "$haproxy_temp"
+haproxy -c -f "$haproxy_temp"
 if [ -f /etc/haproxy/haproxy.cfg ] && \
     ! grep -q '^# Managed by Gate' /etc/haproxy/haproxy.cfg; then
     cp -a /etc/haproxy/haproxy.cfg "/etc/haproxy/haproxy.cfg.before-gate-$RELEASE_ID"
 fi
-install -o root -g root -m 0644 "$TARGET/deploy/haproxy/haproxy.cfg" /etc/haproxy/haproxy.cfg
+install -o root -g root -m 0644 "$haproxy_temp" /etc/haproxy/haproxy.cfg
+rm -f -- "$haproxy_temp"
 
 switch_current "$TARGET"
 ACTIVATED=1
