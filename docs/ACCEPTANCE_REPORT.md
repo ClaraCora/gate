@@ -2,7 +2,7 @@
 
 > 验收日期：2026-09-02
 >
-> 最终验证 release：`20260902-082423-d4aee84-dirty`
+> 最终验证 release：`20260902-083432-1cf0198`
 >
 > 部署目标：`HK-Aliyun`，Debian 13，2 vCPU，约 4 GiB RAM
 
