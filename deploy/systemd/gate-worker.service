@@ -1,0 +1,31 @@
+[Unit]
+Description=Gate privileged network worker
+Requires=gate-firewall.service
+After=gate-firewall.service network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=gate-worker
+WorkingDirectory=/var/lib/gate
+Environment=GATE_CONFIG=/etc/gate/config.yaml
+Environment=GATE_WORKER_USER=gate
+Environment=GATE_WORKER_GROUP=gate-worker
+Environment=GATE_WORKER_SOCKET=/run/gate/worker.sock
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+ExecStart=/opt/gate/current/.venv/bin/gate-worker
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=20s
+RuntimeDirectory=gate
+RuntimeDirectoryMode=0750
+UMask=0077
+NoNewPrivileges=yes
+LockPersonality=yes
+# Filesystem sandboxing would hide bind mounts created by ip netns from host systemd.
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_OVERRIDE CAP_FOWNER CAP_CHOWN CAP_SETUID CAP_SETGID
+AmbientCapabilities=CAP_SYS_ADMIN CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_OVERRIDE CAP_FOWNER CAP_CHOWN CAP_SETUID CAP_SETGID
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

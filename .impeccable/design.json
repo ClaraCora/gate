@@ -1,0 +1,152 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-02T07:20:03.7258032+08:00",
+  "title": "Design System: Gate",
+  "extensions": {
+    "colorMeta": {
+      "graphite-rail": {
+        "role": "neutral",
+        "displayName": "Graphite Rail",
+        "canonical": "#202421",
+        "tonalRamp": ["#101210", "#202421", "#303630", "#4d554e", "#717a72", "#a1a9a2", "#d7dcd7", "#f4f6f4"]
+      },
+      "workshop-canvas": {
+        "role": "neutral",
+        "displayName": "Workshop Canvas",
+        "canonical": "#e9ece8",
+        "tonalRamp": ["#202520", "#3a413b", "#5b655c", "#828b83", "#aab1aa", "#cbd0cb", "#e9ece8", "#f8faf7"]
+      },
+      "command-orange": {
+        "role": "primary",
+        "displayName": "Oxide Command Orange",
+        "canonical": "#d6522e",
+        "tonalRamp": ["#3b1209", "#671f10", "#8e2d18", "#ae3d20", "#d6522e", "#e77c60", "#f2b7a6", "#fce8e2"]
+      },
+      "route-healthy": {
+        "role": "secondary",
+        "displayName": "Verified Route Teal",
+        "canonical": "#14786f",
+        "tonalRamp": ["#082925", "#0a403b", "#0d5d56", "#14786f", "#36968c", "#72b9b1", "#b4dcd7", "#e5f3f1"]
+      },
+      "status-danger": {
+        "role": "tertiary",
+        "displayName": "Failure Red",
+        "canonical": "#b2372f",
+        "tonalRamp": ["#360b09", "#5b1511", "#7d211b", "#9a2c25", "#b2372f", "#d16c65", "#e8aaa5", "#f8e5e3"]
+      },
+      "focus-blue": {
+        "role": "tertiary",
+        "displayName": "Calibration Focus Blue",
+        "canonical": "#1872a5",
+        "tonalRamp": ["#071f31", "#0b3653", "#105078", "#1872a5", "#3e92c0", "#7ab7d5", "#b8d9e9", "#e6f2f8"]
+      }
+    },
+    "typographyMeta": {
+      "headline": {"displayName": "Workbench Headline", "purpose": "Compact section titles inside the operator console."},
+      "body": {"displayName": "Operational Body", "purpose": "Dense table, inspector, and recovery copy."},
+      "label": {"displayName": "Instrument Label", "purpose": "Controls, headers, and status names."},
+      "numeric": {"displayName": "Instrument Readout", "purpose": "Ports, addresses, timestamps, protocols, and comparable measurements."}
+    },
+    "shadows": [
+      {"name": "surface-low", "value": "0 8px 24px rgba(24, 31, 25, 0.11)", "purpose": "Fatal state and selected work surface when separation is necessary."},
+      {"name": "selection", "value": "0 5px 14px rgba(39, 50, 40, 0.12)", "purpose": "Selected port socket."},
+      {"name": "modal", "value": "0 18px 55px rgba(17, 24, 18, 0.28)", "purpose": "Blocking switch confirmation dialog only."}
+    ],
+    "motion": [
+      {"name": "state-standard", "value": "180ms ease-out", "purpose": "Button, border, color, and shadow state changes."},
+      {"name": "list-entry", "value": "220ms cubic-bezier(0.16, 1, 0.3, 1)", "purpose": "New event and task rows; disabled under reduced motion."},
+      {"name": "activity-spin", "value": "900ms linear infinite", "purpose": "Explicit in-progress indicators; disabled under reduced motion."}
+    ],
+    "breakpoints": [
+      {"name": "compact-desktop", "value": "1120px"},
+      {"name": "stacked-workbench", "value": "800px"},
+      {"name": "phone", "value": "520px"}
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Command",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Direct operator command such as test, validate, switch, or retry.",
+      "html": "<button class=\"ds-button-primary\">TEST EXIT</button>",
+      "css": ".ds-button-primary { min-height: 38px; padding: 8px 13px; border: 1px solid transparent; border-radius: 6px; color: #fff; background: var(--orange, #d6522e); font: 700 13px/1.2 'Segoe UI', sans-serif; transition: background-color 180ms ease-out, box-shadow 180ms ease-out; } .ds-button-primary:hover { background: var(--orange-dark, #ae3d20); box-shadow: 0 5px 14px rgba(125,48,27,.22); } .ds-button-primary:focus-visible { outline: 3px solid color-mix(in srgb, var(--focus, #1872a5) 70%, white); outline-offset: 2px; }"
+    },
+    {
+      "name": "Secondary Command",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Lower-emphasis recovery or cancellation action.",
+      "html": "<button class=\"ds-button-secondary\">RECONNECT</button>",
+      "css": ".ds-button-secondary { min-height: 38px; padding: 8px 13px; border: 1px solid var(--line-strong, #9ca59d); border-radius: 6px; color: var(--text, #202421); background: var(--surface, #f8faf7); font: 700 13px/1.2 'Segoe UI', sans-serif; transition: background-color 180ms ease-out; } .ds-button-secondary:hover { background: var(--surface-muted, #eef1ed); } .ds-button-secondary:focus-visible { outline: 3px solid color-mix(in srgb, var(--focus, #1872a5) 70%, white); outline-offset: 2px; }"
+    },
+    {
+      "name": "Regional Port Socket",
+      "kind": "custom",
+      "refersTo": "port-socket",
+      "description": "Fixed SOCKS entry with state lamp and immutable port identity.",
+      "html": "<button class=\"ds-port\"><i></i><strong>11081</strong><small>JAPAN</small></button>",
+      "css": ".ds-port { display: grid; grid-template-columns: 9px 1fr; gap: 4px 8px; min-width: 96px; padding: 10px 12px; text-align: left; color: #202421; background: #fff; border: 1px solid #d6522e; border-radius: 5px; box-shadow: 0 5px 14px rgba(39,50,40,.12); } .ds-port i { align-self: center; grid-row: 1 / span 2; width: 7px; height: 7px; background: #14786f; border-radius: 50%; } .ds-port strong { font: 700 14px/1.2 'Cascadia Mono', Consolas, monospace; } .ds-port small { color: #59635b; font: 11px/1.2 'Segoe UI', sans-serif; } .ds-port:focus-visible { outline: 3px solid #5ca3c9; outline-offset: 2px; }"
+    },
+    {
+      "name": "Mode Segmented Control",
+      "kind": "custom",
+      "description": "Three-way automatic, locked, and disabled operating mode selector.",
+      "html": "<div class=\"ds-segmented\"><button aria-pressed=\"true\">AUTO</button><button>LOCKED</button><button>OFF</button></div>",
+      "css": ".ds-segmented { display: grid; grid-template-columns: repeat(3, 1fr); padding: 3px; background: #dce1dc; border-radius: 6px; } .ds-segmented button { min-height: 34px; padding: 6px; color: #59635b; background: transparent; border: 0; border-radius: 4px; font: 700 11px/1.2 'Segoe UI', sans-serif; } .ds-segmented button:hover { color: #202421; background: rgba(255,255,255,.52); } .ds-segmented button[aria-pressed='true'] { color: #202421; background: #fff; box-shadow: 0 2px 7px rgba(26,34,27,.12); } .ds-segmented button:focus-visible { outline: 3px solid #5ca3c9; outline-offset: 1px; }"
+    },
+    {
+      "name": "Detail Tabs",
+      "kind": "nav",
+      "description": "Candidate, job, and event navigation with integrated count readout.",
+      "html": "<nav class=\"ds-tabs\"><button aria-selected=\"true\">CANDIDATES <span>52</span></button><button>JOBS <span>1</span></button></nav>",
+      "css": ".ds-tabs { display: flex; gap: 2px; background: #dde2dc; border-bottom: 1px solid #9ca59d; } .ds-tabs button { min-height: 44px; padding: 8px 13px; color: #59635b; background: transparent; border: 0; border-bottom: 2px solid transparent; font: 700 12px/1.2 'Segoe UI', sans-serif; } .ds-tabs button:hover { color: #202421; } .ds-tabs button[aria-selected='true'] { color: #202421; background: #f8faf7; border-bottom-color: #d6522e; } .ds-tabs span { display: inline-block; min-width: 20px; padding: 2px 5px; background: #cbd2cb; border-radius: 999px; font-size: 10px; } .ds-tabs button:focus-visible { outline: 3px solid #5ca3c9; outline-offset: -3px; }"
+    },
+    {
+      "name": "Password Field",
+      "kind": "input",
+      "description": "Operator authentication field with explicit focus treatment.",
+      "html": "<label class=\"ds-field\"><span>PASSWORD</span><input type=\"password\" placeholder=\"Enter administrator password\"></label>",
+      "css": ".ds-field { display: grid; gap: 8px; color: #202421; font: 700 12px/1.2 'Segoe UI', sans-serif; } .ds-field input { height: 46px; padding: 0 13px; color: #202421; background: #f8faf7; border: 1px solid #9ca59d; border-radius: 6px; font: 400 14px/1.2 'Segoe UI', sans-serif; } .ds-field input:focus { border-color: #1872a5; outline: 0; box-shadow: 0 0 0 2px rgba(24,114,165,.16); }"
+    },
+    {
+      "name": "Protocol Tag",
+      "kind": "chip",
+      "description": "Compact transport marker within dense candidate tables.",
+      "html": "<span class=\"ds-protocol\">TCP</span>",
+      "css": ".ds-protocol { display: inline-flex; padding: 3px 5px; color: #31594f; background: #dfeae5; border-radius: 3px; font: 700 10px/1 'Cascadia Mono', Consolas, monospace; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Regional Calibration Bench",
+    "overview": "Gate looks like a compact instrument used repeatedly by one operator, not a general-purpose analytics dashboard. A graphite command rail, numbered port sockets, hairline dividers, and an explicit route trace make the fixed-entry/dynamic-exit model visible before any action is taken. The interface is quiet, dense, and factual. Work surfaces are cool and nearly white; color is reserved for command intent and operational state.",
+    "keyCharacteristics": [
+      "Compact operational density with clear scan lines.",
+      "Fixed SOCKS ports presented as physical sockets on one rail.",
+      "Oxide orange for deliberate commands, teal for verified health, and red for exact failure.",
+      "Tabular numerals and monospace endpoints wherever values must be compared.",
+      "Flat work surfaces separated by borders, with elevation reserved for selection and overlays."
+    ],
+    "rules": [
+      {"name": "Sparse Signal", "body": "Saturated colors communicate command or state; they do not decorate empty space.", "section": "colors"},
+      {"name": "Status Truth", "body": "Green or teal appears only after end-to-end validation has succeeded.", "section": "colors"},
+      {"name": "Instrument Readout", "body": "Use mono only for values an operator compares or transcribes.", "section": "typography"},
+      {"name": "Local Overflow", "body": "A rail or data table may scroll horizontally; the page root may not.", "section": "layout"},
+      {"name": "Flat Workbench", "body": "Resting page sections use borders and tonal layering, not floating cards.", "section": "elevation"}
+    ],
+    "dos": [
+      "Do keep fixed ports and dynamic exits visually distinct.",
+      "Do use tabular numeric treatment for ports, IP addresses, latency, and timestamps.",
+      "Do show loading, empty, disabled, failed, and reconnecting states in place.",
+      "Do keep actions reversible, named, and adjacent to the state they affect.",
+      "Do preserve keyboard focus, text labels, and reduced-motion behavior."
+    ],
+    "donts": [
+      "Don't replace the workbench with detached metric cards or a marketing dashboard.",
+      "Don't use healthy teal for unverified VPN Gate metadata or an API-only score.",
+      "Don't hide failure reasons behind a generic offline label when exact evidence exists.",
+      "Don't expose desktop-only interactions or allow the document root to overflow on mobile.",
+      "Don't add gradients, decorative illustrations, oversized headings, or soft pill controls."
+    ]
+  }
+}

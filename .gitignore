@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+dist/
+build/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+*.tsbuildinfo
+playwright-report/
+test-results/
+
+# Runtime and secrets
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.*
+!.env.example
+*.ovpn
+*.pem
+*.key
+
+# Impeccable local/review output
+.impeccable/config.local.json
+.impeccable/review/
+.impeccable/mocks/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

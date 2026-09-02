@@ -1,0 +1,63 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gate-control"
+version = "0.1.0"
+description = "Multi-region SOCKS5 exit controller backed by VPN Gate"
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "MIT" }
+authors = [{ name = "ClaraCora" }]
+dependencies = [
+  "aiosqlite>=0.21,<1",
+  "argon2-cffi>=25.1,<26",
+  "cryptography>=45,<47",
+  "fastapi>=0.116,<1",
+  "httpx>=0.28,<1",
+  "pydantic-settings>=2.10,<3",
+  "pyyaml>=6.0,<7",
+  "sqlalchemy>=2.0,<3",
+  "socksio>=1.0,<2",
+  "uvicorn[standard]>=0.35,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy>=1.17,<2",
+  "pytest>=8.4,<9",
+  "pytest-asyncio>=1.1,<2",
+  "ruff>=0.12,<1",
+  "types-PyYAML>=6.0,<7",
+]
+
+[project.scripts]
+gate-api = "gate.api:main"
+gate-worker = "gate.worker:main"
+gate-password-hash = "gate.security:hash_password_main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["backend/src/gate"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+testpaths = ["backend/tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.13"
+platform = "linux"
+strict = true
+packages = ["gate"]
+mypy_path = "backend/src"
+
+[tool.coverage.run]
+source = ["gate"]

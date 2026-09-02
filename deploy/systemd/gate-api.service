@@ -1,0 +1,32 @@
+[Unit]
+Description=Gate HTTP API and WebUI
+After=network.target gate-worker.service
+Wants=gate-worker.service
+
+[Service]
+Type=simple
+User=gate
+Group=gate-worker
+WorkingDirectory=/var/lib/gate
+Environment=GATE_CONFIG=/etc/gate/config.yaml
+Environment=GATE_WEB_ROOT=/opt/gate/current/frontend/dist
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/etc/gate/secrets.env
+ExecStart=/opt/gate/current/.venv/bin/gate-api
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=15s
+UMask=0027
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+LockPersonality=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+ReadWritePaths=/var/lib/gate
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

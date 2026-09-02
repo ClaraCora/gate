@@ -1,0 +1,16 @@
+[Unit]
+Description=Gate host forwarding and NAT rules
+After=network-online.target docker.service
+Wants=network-online.target
+Before=gate-worker.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/gate/firewall.env
+ExecStart=/usr/libexec/gate/gate-firewall.sh start
+ExecReload=/usr/libexec/gate/gate-firewall.sh restart
+ExecStop=/usr/libexec/gate/gate-firewall.sh stop
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
