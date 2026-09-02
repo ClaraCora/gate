@@ -90,6 +90,7 @@ fi
 install -d -o root -g root -m 0755 "$TARGET"
 TARGET_CREATED=1
 tar -xzf "$ARCHIVE" -C "$TARGET"
+chown -R root:root "$TARGET"
 
 python3 -m venv "$TARGET/.venv"
 app_wheels="$(find "$TARGET/dist" -maxdepth 1 -type f -name 'gate_control-*.whl' -print 2>/dev/null || true)"
@@ -174,7 +175,7 @@ systemctl restart gate-api.service
 attempt=0
 until curl --fail --silent http://127.0.0.1:18080/api/v1/health/ready >/dev/null; do
     attempt=$((attempt + 1))
-    if [ "$attempt" -ge 20 ]; then
+    if [ "$attempt" -ge 90 ]; then
         echo "Gate API readiness check failed" >&2
         exit 4
     fi

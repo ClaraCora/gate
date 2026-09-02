@@ -125,7 +125,8 @@ jobs:
               | sort -z \
               | xargs -0 sha256sum >SHA256SUMS
           )
-          tar -C "$package_root" -czf "$ASSET_NAME" .
+          tar --owner=0 --group=0 --numeric-owner \
+            -C "$package_root" -czf "$ASSET_NAME" .
           sha256sum "$ASSET_NAME" >"$ASSET_NAME.sha256"
           cp deploy/install-from-github.sh gate-install.sh
           chmod 0755 gate-install.sh
