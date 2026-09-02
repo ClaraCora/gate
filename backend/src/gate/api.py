@@ -5,8 +5,9 @@ import os
 import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol, cast
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request, Response, status
@@ -18,7 +19,7 @@ from gate import __version__
 from gate.config import GateSettings, SocksAuthConfig, load_settings
 from gate.controller import AutomationController
 from gate.coordinator import SwitchCoordinator
-from gate.database import Database, JobStatus
+from gate.database import Database, JobStatus, utc_now
 from gate.discovery import DiscoveryService
 from gate.domain import RegionMode
 from gate.errors import GateError
@@ -30,6 +31,8 @@ from gate.schemas import (
     ChangePasswordRequest,
     DiscoveryResponse,
     EventResponse,
+    HealthCheckResponse,
+    HealthHistoryResponse,
     HealthResponse,
     JobResponse,
     LoginRequest,
@@ -54,6 +57,10 @@ class WorkerHealthGateway(Protocol):
 
 class WorkerGateway(Protocol):
     async def request(self, request: WorkerRequest) -> dict[str, object]: ...
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 def create_app(
@@ -591,6 +598,34 @@ def create_app(
             )
             for region, candidate_count in records
         ]
+
+    @app.get("/api/v1/health-history", response_model=HealthHistoryResponse)
+    async def health_history(
+        hours: int = Query(default=2, ge=1, le=24),
+    ) -> HealthHistoryResponse:
+        generated_at = utc_now()
+        records = await app_database.list_active_health_probes(
+            generated_at - timedelta(hours=hours),
+            generated_at,
+        )
+        return HealthHistoryResponse(
+            window_hours=hours,
+            generated_at=generated_at,
+            checks=[
+                HealthCheckResponse(
+                    id=record.id,
+                    region_id=record.region_id,
+                    result=cast(Literal["succeeded", "failed"], record.result),
+                    egress_ip=record.egress_ip,
+                    latency_median_ms=record.latency_median_ms,
+                    error_code=record.error_code,
+                    started_at=_as_utc(record.started_at),
+                    finished_at=_as_utc(record.finished_at),
+                )
+                for record in records
+                if record.finished_at is not None and record.result in {"succeeded", "failed"}
+            ],
+        )
 
     @app.get(
         "/api/v1/regions/{region_id}/candidates",

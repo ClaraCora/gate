@@ -3,8 +3,8 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { PropsWithChildren } from "react";
 
 import { gateApi } from "./api";
-import { AutomationControl, RegionTable, SocksAuthDialog, useGateStream } from "./App";
-import type { Region } from "./types";
+import { AutomationControl, HealthGrains, RegionTable, SocksAuthDialog, useGateStream } from "./App";
+import type { HealthCheck, Region } from "./types";
 
 function wrapper({ children }: PropsWithChildren) {
   const client = new QueryClient({
@@ -84,7 +84,7 @@ describe("automatic checks", () => {
 
     for (let index = 0; index < 20; index += 1) FakeEventSource.instance.emit();
 
-    await waitFor(() => expect(invalidate).toHaveBeenCalledTimes(6), { timeout: 1_000 });
+    await waitFor(() => expect(invalidate).toHaveBeenCalledTimes(7), { timeout: 1_000 });
     view.unmount();
     expect(FakeEventSource.instance.closed).toBe(true);
   });
@@ -127,6 +127,22 @@ describe("region table", () => {
 
     render(
       <RegionTable
+        healthHistory={{
+          checks: [{
+            id: 1,
+            region_id: "jp",
+            result: "succeeded",
+            egress_ip: "203.0.113.10",
+            latency_median_ms: 42,
+            error_code: null,
+            started_at: "2026-09-02T01:58:00Z",
+            finished_at: "2026-09-02T01:58:05Z",
+          }],
+          generated_at: "2026-09-02T02:00:00Z",
+          window_hours: 2,
+        }}
+        healthHistoryLoading={false}
+        healthHistoryUnavailable={false}
         jobs={[]}
         listen="0.0.0.0"
         modePendingRegionId={null}
@@ -142,6 +158,43 @@ describe("region table", () => {
     expect(screen.getByText("0.0.0.0:11081")).toBeInTheDocument();
     expect(screen.getByText("203.0.113.10")).toBeInTheDocument();
     expect(screen.getByText("未分配")).toBeInTheDocument();
+    expect(screen.getByText("1/1 成功")).toBeInTheDocument();
+    expect(screen.getByText("暂无检查")).toBeInTheDocument();
+  });
+});
+
+describe("health grains", () => {
+  it("distinguishes intermittent and continuous failures within the time window", () => {
+    const check = (
+      id: number,
+      result: "succeeded" | "failed",
+      finishedAt: string,
+    ): HealthCheck => ({
+      id,
+      region_id: "jp",
+      result,
+      egress_ip: result === "succeeded" ? "203.0.113.10" : null,
+      latency_median_ms: result === "succeeded" ? 80 : null,
+      error_code: result === "failed" ? "PROBE_FAILED" : null,
+      started_at: finishedAt,
+      finished_at: finishedAt,
+    });
+    const { container } = render(
+      <HealthGrains
+        checks={[
+          check(1, "failed", "2026-09-02T01:51:00Z"),
+          check(2, "succeeded", "2026-09-02T01:56:00Z"),
+          check(3, "failed", "2026-09-02T01:57:00Z"),
+        ]}
+        generatedAt="2026-09-02T02:00:00Z"
+        windowHours={2}
+      />,
+    );
+
+    expect(screen.getByRole("group", { name: "最近 2 小时：1 次成功，2 次失败" })).toBeInTheDocument();
+    expect(container.querySelectorAll(".health-grain--failed")).toHaveLength(1);
+    expect(container.querySelectorAll(".health-grain--mixed")).toHaveLength(1);
+    expect(container.querySelector(".health-grain--mixed")).toHaveAttribute("title", expect.stringContaining("间歇波动"));
   });
 });
 

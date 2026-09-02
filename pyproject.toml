@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "gate-control"
-version = "0.1.8"
+version = "0.1.9"
 description = "Multi-region SOCKS5 exit controller backed by VPN Gate"
 readme = "README.md"
 requires-python = ">=3.13"

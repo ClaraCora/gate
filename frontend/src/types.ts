@@ -50,6 +50,23 @@ export interface Region {
   updated_at: string;
 }
 
+export interface HealthCheck {
+  id: number;
+  region_id: string;
+  result: "succeeded" | "failed";
+  egress_ip: string | null;
+  latency_median_ms: number | null;
+  error_code: string | null;
+  started_at: string;
+  finished_at: string;
+}
+
+export interface HealthHistory {
+  window_hours: number;
+  generated_at: string;
+  checks: HealthCheck[];
+}
+
 export interface Candidate {
   id: number;
   hostname: string;

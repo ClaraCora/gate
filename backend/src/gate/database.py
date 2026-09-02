@@ -12,6 +12,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -112,6 +113,7 @@ class NodeObservationRecord(Base):
 
 class ProbeRunRecord(Base):
     __tablename__ = "probe_runs"
+    __table_args__ = (Index("ix_probe_runs_type_finished", "probe_type", "finished_at"),)
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     region_id: Mapped[str] = mapped_column(ForeignKey("regions.id"), index=True)
@@ -228,6 +230,10 @@ class Database:
         for name, statement in additions.items():
             if name not in columns:
                 connection.exec_driver_sql(statement)
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_probe_runs_type_finished "
+            "ON probe_runs (probe_type, finished_at)"
+        )
 
     async def initialize(self, regions: Sequence[RegionConfig]) -> None:
         from gate.network import slot_spec
@@ -647,6 +653,24 @@ class Database:
         async with self.sessions() as session, session.begin():
             session.add(record)
         return record
+
+    async def list_active_health_probes(
+        self,
+        since: datetime,
+        until: datetime,
+    ) -> list[ProbeRunRecord]:
+        async with self.sessions() as session:
+            statement = (
+                select(ProbeRunRecord)
+                .where(
+                    ProbeRunRecord.probe_type == "active_health",
+                    ProbeRunRecord.finished_at.is_not(None),
+                    ProbeRunRecord.finished_at >= since,
+                    ProbeRunRecord.finished_at <= until,
+                )
+                .order_by(ProbeRunRecord.finished_at, ProbeRunRecord.id)
+            )
+            return list(await session.scalars(statement))
 
     async def get_probe_metrics(self, region_id: str, node_id: int) -> ProbeMetrics | None:
         cutoff = utc_now() - timedelta(hours=24)

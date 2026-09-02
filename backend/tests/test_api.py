@@ -344,7 +344,18 @@ async def test_discovery_populates_region_candidates_and_events(
                 country_code="JP",
                 latency_ms=42.0,
             )
+            await database.record_probe(
+                region_id="jp",
+                node_id=node_id,
+                probe_type="active_health",
+                result="succeeded",
+                egress_ip="203.0.113.10",
+                country_code="JP",
+                latency_ms=42.0,
+            )
             candidates = await client.get("/api/v1/regions/jp/candidates")
+            health_history = await client.get("/api/v1/health-history?hours=2")
+            invalid_history_window = await client.get("/api/v1/health-history?hours=25")
             events = await client.get("/api/v1/events")
 
     assert ready.status_code == 200
@@ -355,6 +366,22 @@ async def test_discovery_populates_region_candidates_and_events(
     assert candidates.json()[0]["transport"] == "udp"
     assert candidates.json()[0]["measured_latency_ms"] == 42.0
     assert candidates.json()[0]["quality_score"] > 0
+    assert health_history.json()["window_hours"] == 2
+    assert health_history.json()["checks"][0]["started_at"].endswith("Z")
+    assert health_history.json()["checks"][0]["finished_at"].endswith("Z")
+    assert health_history.json()["checks"] == [
+        {
+            "id": 2,
+            "region_id": "jp",
+            "result": "succeeded",
+            "egress_ip": "203.0.113.10",
+            "latency_median_ms": 42.0,
+            "error_code": None,
+            "started_at": health_history.json()["checks"][0]["started_at"],
+            "finished_at": health_history.json()["checks"][0]["finished_at"],
+        }
+    ]
+    assert invalid_history_window.status_code == 422
     assert events.json()[0]["code"] == "DISCOVERY_COMPLETED"
 
 

@@ -3,6 +3,7 @@ import type {
   Candidate,
   DiscoveryResult,
   GateEvent,
+  HealthHistory,
   Job,
   Region,
   RegionMode,
@@ -98,6 +99,8 @@ export const gateApi = {
       body: JSON.stringify({ enabled }),
     }),
   regions: () => request<Region[]>("/api/v1/regions"),
+  healthHistory: (hours = 2) =>
+    request<HealthHistory>(`/api/v1/health-history?hours=${hours}`),
   candidates: (regionId: string) =>
     request<Candidate[]>(`/api/v1/regions/${regionId}/candidates?limit=500`),
   slots: () => request<RuntimeSlot[]>("/api/v1/runtime/slots"),

@@ -74,6 +74,23 @@ class RegionModeRequest(BaseModel):
     mode: Literal["auto", "locked", "disabled"]
 
 
+class HealthCheckResponse(BaseModel):
+    id: int
+    region_id: str
+    result: Literal["succeeded", "failed"]
+    egress_ip: str | None
+    latency_median_ms: float | None
+    error_code: str | None
+    started_at: datetime
+    finished_at: datetime
+
+
+class HealthHistoryResponse(BaseModel):
+    window_hours: int
+    generated_at: datetime
+    checks: list[HealthCheckResponse]
+
+
 class SlotRuntimeResponse(BaseModel):
     region_id: str
     slot: Literal["a", "b"]

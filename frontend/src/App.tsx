@@ -46,6 +46,8 @@ import { eventDescription, eventLevelLabel, eventTitle } from "./events";
 import type {
   Candidate,
   GateEvent,
+  HealthCheck,
+  HealthHistory,
   Job,
   Region,
   RegionMode,
@@ -230,6 +232,7 @@ export function useGateStream(enabled: boolean): StreamState {
         void queryClient.invalidateQueries({ queryKey: ["slots"] });
         void queryClient.invalidateQueries({ queryKey: ["automation"] });
         void queryClient.invalidateQueries({ queryKey: ["socks-auth"] });
+        void queryClient.invalidateQueries({ queryKey: ["health-history"] });
       }, 500);
     });
     return () => {
@@ -329,10 +332,118 @@ function SlotPair({ slots, unavailable = false }: { slots: RuntimeSlot[]; unavai
   );
 }
 
+const HEALTH_GRAIN_COUNT = 24;
+
+type HealthGrainState = "empty" | "healthy" | "mixed" | "failed";
+
+function healthErrorLabel(errorCode: string | null): string {
+  if (errorCode === "PROBE_FAILED") return "SOCKS 出口探测失败";
+  return errorCode ? "健康检查返回异常" : "健康检查失败";
+}
+
+function healthClock(value: number): string {
+  return new Intl.DateTimeFormat("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(new Date(value));
+}
+
+function grainDetail(checks: HealthCheck[], startedAt: number, finishedAt: number): string {
+  const range = `${healthClock(startedAt)}-${healthClock(finishedAt)}`;
+  if (checks.length === 0) return `${range}，没有检查记录`;
+  const succeeded = checks.filter((check) => check.result === "succeeded");
+  const failed = checks.filter((check) => check.result === "failed");
+  const latencies = succeeded
+    .map((check) => check.latency_median_ms)
+    .filter((value): value is number => value !== null);
+  const averageLatency = latencies.length > 0
+    ? `，平均延迟 ${Math.round(latencies.reduce((sum, value) => sum + value, 0) / latencies.length)} ms`
+    : "";
+  const egressIp = [...checks].reverse().find((check) => check.egress_ip)?.egress_ip;
+  const egress = egressIp ? `，出口 ${egressIp}` : "";
+  if (failed.length === 0) {
+    return `${range}，${succeeded.length} 次检查均成功${averageLatency}${egress}`;
+  }
+  const failure = healthErrorLabel(failed.at(-1)?.error_code ?? null);
+  if (succeeded.length === 0) {
+    return `${range}，${failed.length} 次检查均失败，${failure}`;
+  }
+  return `${range}，间歇波动：${succeeded.length} 次成功、${failed.length} 次失败${averageLatency}${egress}`;
+}
+
+export function HealthGrains({
+  checks,
+  generatedAt,
+  windowHours,
+  loading = false,
+  unavailable = false,
+}: {
+  checks: HealthCheck[];
+  generatedAt: string | undefined;
+  windowHours: number;
+  loading?: boolean;
+  unavailable?: boolean;
+}) {
+  const parsedEnd = generatedAt ? Date.parse(generatedAt) : Number.NaN;
+  const endAt = Number.isFinite(parsedEnd) ? parsedEnd : Date.now();
+  const bucketDuration = (windowHours * 3_600_000) / HEALTH_GRAIN_COUNT;
+  const startAt = endAt - windowHours * 3_600_000;
+  const buckets = Array.from({ length: HEALTH_GRAIN_COUNT }, () => [] as HealthCheck[]);
+  for (const check of checks) {
+    const finishedAt = Date.parse(check.finished_at);
+    if (!Number.isFinite(finishedAt) || finishedAt < startAt || finishedAt > endAt) continue;
+    const bucketIndex = Math.min(
+      HEALTH_GRAIN_COUNT - 1,
+      Math.floor((finishedAt - startAt) / bucketDuration),
+    );
+    buckets[bucketIndex].push(check);
+  }
+  const succeeded = checks.filter((check) => check.result === "succeeded").length;
+  const failed = checks.filter((check) => check.result === "failed").length;
+  const summary = loading
+    ? "正在加载"
+    : unavailable
+      ? "记录不可用"
+      : succeeded + failed > 0
+        ? `${succeeded}/${succeeded + failed} 成功`
+        : "暂无检查";
+  const accessibleSummary = loading
+    ? "正在加载最近健康检查"
+    : unavailable
+      ? "最近健康检查记录暂时不可用"
+      : `最近 ${windowHours} 小时：${succeeded} 次成功，${failed} 次失败`;
+
+  return (
+    <div aria-label={accessibleSummary} className="health-grains" role="group">
+      <span aria-hidden="true" className="health-grains__track">
+        {buckets.map((bucket, index) => {
+          const bucketSucceeded = bucket.filter((check) => check.result === "succeeded").length;
+          const bucketFailed = bucket.filter((check) => check.result === "failed").length;
+          const state: HealthGrainState = bucket.length === 0 || loading || unavailable
+            ? "empty"
+            : bucketSucceeded > 0 && bucketFailed > 0
+              ? "mixed"
+              : bucketFailed > 0
+                ? "failed"
+                : "healthy";
+          const bucketStart = startAt + index * bucketDuration;
+          const detail = grainDetail(bucket, bucketStart, bucketStart + bucketDuration);
+          return <i className={`health-grain health-grain--${state}`} key={index} title={detail} />;
+        })}
+      </span>
+      <span className="health-grains__summary">{summary}</span>
+    </div>
+  );
+}
+
 export function RegionTable({
   regions,
   slots,
   jobs,
+  healthHistory,
+  healthHistoryLoading,
+  healthHistoryUnavailable,
   selectedId,
   onSelect,
   onToggle,
@@ -343,6 +454,9 @@ export function RegionTable({
   regions: Region[];
   slots: RuntimeSlot[];
   jobs: Job[];
+  healthHistory: HealthHistory | undefined;
+  healthHistoryLoading: boolean;
+  healthHistoryUnavailable: boolean;
   selectedId: string | null;
   onSelect: (id: string) => void;
   onToggle: (region: Region) => void;
@@ -357,12 +471,18 @@ export function RegionTable({
     grouped.set(region.group_id, entries);
   }
   const groups = Array.from(grouped.entries());
+  const checksByRegion = new Map<string, HealthCheck[]>();
+  for (const check of healthHistory?.checks ?? []) {
+    const checks = checksByRegion.get(check.region_id) ?? [];
+    checks.push(check);
+    checksByRegion.set(check.region_id, checks);
+  }
   return (
     <div className="region-table-wrap">
       <table className="region-table">
         <thead>
           <tr>
-            <th>地区 / 端口</th><th>出口 IP</th><th>模式</th><th>线路状态</th><th>A/B 数据面</th><th>候选</th><th>更新时间</th>
+            <th>地区 / 端口</th><th>出口 IP</th><th>模式</th><th>线路状态</th><th><span className="health-column-heading">近 {healthHistory?.window_hours ?? 2} 小时<small>每格 5 分钟</small></span></th><th>A/B 数据面</th><th>候选</th><th>更新时间</th>
           </tr>
         </thead>
         <tbody>
@@ -372,7 +492,7 @@ export function RegionTable({
             return (
               <Fragment key={groupId}>
                 <tr className="region-group-row">
-                  <th colSpan={7} scope="rowgroup">
+                  <th colSpan={8} scope="rowgroup">
                     <span className="region-group-content">
                       <span aria-label={groupLabel(first)} className="region-group-flag" role="img">{countryFlag(first.countries[0] ?? "")}</span>
                       <strong>{groupLabel(first)}</strong>
@@ -407,6 +527,15 @@ export function RegionTable({
                       <td>
                         <StatusBadge status={region.status} />
                         {activeJob ? <span className="job-inline">{Math.round(activeJob.progress * 100)}%</span> : null}
+                      </td>
+                      <td>
+                        <HealthGrains
+                          checks={checksByRegion.get(region.id) ?? []}
+                          generatedAt={healthHistory?.generated_at}
+                          loading={healthHistoryLoading}
+                          unavailable={healthHistoryUnavailable}
+                          windowHours={healthHistory?.window_hours ?? 2}
+                        />
                       </td>
                       <td><SlotPair slots={slots.filter((slot) => slot.region_id === region.id)} unavailable={runtimeUnavailable} /></td>
                       <td><span className="numeric">{region.candidate_count}</span></td>
@@ -1110,6 +1239,12 @@ function ConsoleView({
   const automationQuery = useQuery({ queryKey: ["automation"], queryFn: gateApi.automation });
   const socksAuthQuery = useQuery({ queryKey: ["socks-auth"], queryFn: gateApi.socksAuth });
   const regionsQuery = useQuery({ queryKey: ["regions"], queryFn: gateApi.regions, refetchInterval: 10_000 });
+  const healthHistoryQuery = useQuery({
+    queryKey: ["health-history", 2],
+    queryFn: () => gateApi.healthHistory(2),
+    refetchInterval: 30_000,
+    retry: false,
+  });
   const slotsQuery = useQuery({ queryKey: ["slots"], queryFn: gateApi.slots, refetchInterval: 10_000, retry: false });
   const jobsQuery = useQuery({ queryKey: ["jobs"], queryFn: gateApi.jobs, refetchInterval: 5_000 });
   const eventsQuery = useQuery({ queryKey: ["events"], queryFn: gateApi.events, refetchInterval: 15_000 });
@@ -1258,7 +1393,7 @@ function ConsoleView({
               <main className="workspace">
                 <section className="routes-panel" aria-labelledby="routes-title">
                   <div className="section-heading"><div><h1 id="routes-title">地区入口</h1><p>同一地区可开启多个固定端口，每个端口使用互不重复的真实出口。</p></div><span className="last-sync"><Clock3 size={14} />{formatTime(regions[0]?.updated_at)}</span></div>
-                  <RegionTable jobs={jobs} listen={socksAuthQuery.data?.listen ?? "127.0.0.1"} modePendingRegionId={modeMutation.isPending ? modeMutation.variables?.regionId ?? null : null} onSelect={selectRegion} onToggle={toggleRegion} regions={regions} runtimeUnavailable={slotsQuery.isError} selectedId={selectedId} slots={slots} />
+                  <RegionTable healthHistory={healthHistoryQuery.data} healthHistoryLoading={healthHistoryQuery.isLoading} healthHistoryUnavailable={healthHistoryQuery.isError} jobs={jobs} listen={socksAuthQuery.data?.listen ?? "127.0.0.1"} modePendingRegionId={modeMutation.isPending ? modeMutation.variables?.regionId ?? null : null} onSelect={selectRegion} onToggle={toggleRegion} regions={regions} runtimeUnavailable={slotsQuery.isError} selectedId={selectedId} slots={slots} />
                 </section>
                 {selectedRegion ? <RegionInspector activeCandidate={activeCandidate} activeJob={activeJob} listen={socksAuthQuery.data?.listen ?? "127.0.0.1"} modePending={modeMutation.isPending && modeMutation.variables?.regionId === selectedRegion.id} onCandidates={() => setCandidateOpen(true)} onMode={(mode) => modeMutation.mutate({ regionId: selectedRegion.id, mode })} onProbe={() => probeMutation.mutate(selectedRegion.id)} onReconnect={() => reconnectMutation.mutate(selectedRegion.id)} onToggle={() => toggleRegion(selectedRegion)} probePending={probeMutation.isPending} reconnectPending={reconnectMutation.isPending} region={selectedRegion} runtimeUnavailable={slotsQuery.isError} slots={selectedSlots} /> : null}
               </main>
