@@ -30,6 +30,7 @@ v0.1 MVP 已实现并部署到真实 VPS，已完成生产链路、断线阻断�
 
 - [完整项目方案书](docs/PROJECT_PLAN.md)
 - [部署与运维手册](docs/OPERATIONS.md)
+- [完整部署与卸载教程](docs/DEPLOYMENT.md)
 - [生产验收报告](docs/ACCEPTANCE_REPORT.md)
 - [界面设计系统](DESIGN.md)
 
@@ -111,7 +112,7 @@ Invoke-RestMethod -Method Post http://127.0.0.1:18080/api/v1/discovery/refresh
 
 脚本要求 SSH 远端用户为 root，发布前自动执行前后端检查和生产构建。首次部署生成的管理员
 明文密码只在终端显示一次，不会写入 Git。完整前置条件、备份、回滚、诊断和凭据轮换见
-[运维手册](docs/OPERATIONS.md)。
+[完整部署与卸载教程](docs/DEPLOYMENT.md)和[运维手册](docs/OPERATIONS.md)。
 
 ## 资源占用
 

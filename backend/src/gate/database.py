@@ -182,6 +182,15 @@ class RegionSelectionRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class SecurityStateRecord(Base):
+    __tablename__ = "security_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    password_hash: Mapped[str] = mapped_column(Text)
+    session_secret: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class Database:
     def __init__(self, url: str) -> None:
         self.engine: AsyncEngine = create_async_engine(url)
@@ -274,6 +283,36 @@ class Database:
         except Exception:
             return False
         return True
+
+    async def get_security_credentials(self) -> tuple[str, str] | None:
+        async with self.sessions() as session:
+            record = await session.get(SecurityStateRecord, 1)
+            if record is None:
+                return None
+            return record.password_hash, record.session_secret
+
+    async def set_security_credentials(self, password_hash: str, session_secret: str) -> None:
+        async with self.sessions() as session, session.begin():
+            record = await session.get(SecurityStateRecord, 1)
+            if record is None:
+                session.add(
+                    SecurityStateRecord(
+                        id=1,
+                        password_hash=password_hash,
+                        session_secret=session_secret,
+                    )
+                )
+            else:
+                record.password_hash = password_hash
+                record.session_secret = session_secret
+                record.updated_at = utc_now()
+            session.add(
+                EventRecord(
+                    code="SECURITY_PASSWORD_CHANGED",
+                    level="info",
+                    message="管理员密码已修改。其他登录会话已失效",
+                )
+            )
 
     async def ingest_nodes(
         self, items: Iterable[tuple[VpnGateNode, SanitizedProfile]], observed_at: datetime

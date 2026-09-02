@@ -9,6 +9,7 @@ export type RegionStatus =
 
 export interface SessionState {
   authenticated: boolean;
+  security_enabled: boolean;
   csrf_token: string | null;
   expires_at: string | null;
 }

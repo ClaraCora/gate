@@ -6,13 +6,17 @@ import {
 import {
   Activity,
   ArrowLeftRight,
+  ArrowUpDown,
   Check,
   CircleAlert,
   CircleCheck,
   CircleOff,
   Clock3,
+  Eye,
+  EyeOff,
   Gauge,
   KeyRound,
+  ListTodo,
   LoaderCircle,
   LockKeyhole,
   LogOut,
@@ -22,15 +26,19 @@ import {
   RefreshCw,
   RotateCcw,
   ServerCog,
+  Search,
   ShieldCheck,
   ShieldOff,
   TriangleAlert,
+  Waypoints,
   X,
 } from "lucide-react";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { ApiError, gateApi, setCsrfToken } from "./api";
+import { filterAndSortCandidates } from "./candidateSort";
+import type { CandidateSortKey } from "./candidateSort";
 import { AnimatedList } from "./components/AnimatedList";
 import { countryFlag, countryNameZh } from "./countries";
 import { eventDescription, eventLevelLabel, eventTitle } from "./events";
@@ -439,6 +447,7 @@ function RegionInspector({
   runtimeUnavailable,
   onMode,
   onToggle,
+  onCandidates,
   onProbe,
   onReconnect,
 }: {
@@ -452,6 +461,7 @@ function RegionInspector({
   runtimeUnavailable: boolean;
   onMode: (mode: RegionMode) => void;
   onToggle: () => void;
+  onCandidates: () => void;
   onProbe: () => void;
   onReconnect: () => void;
 }) {
@@ -466,7 +476,16 @@ function RegionInspector({
         <span className="route-wire"><i /></span>
         <div className="route-switch"><ArrowLeftRight size={18} /><small>A / B</small></div>
         <span className={`route-wire ${region.status === "healthy" ? "route-wire--live" : ""}`}><i /></span>
-        <div className="route-endpoint route-endpoint--exit"><span>出口</span><strong>{activeCandidate ? countryFlag(activeCandidate.country_code) : "--"}</strong></div>
+        <button
+          aria-haspopup="dialog"
+          className="route-endpoint route-endpoint--exit"
+          onClick={onCandidates}
+          title="查看候选出口"
+          type="button"
+        >
+          <span>出口</span>
+          <strong>{activeCandidate ? countryFlag(activeCandidate.country_code) : "--"}</strong>
+        </button>
       </div>
       <dl className="signal-grid">
         <div><dt>当前节点</dt><dd>{activeCandidate?.ip ?? (region.active_node_id ? `#${region.active_node_id}` : "未连接")}</dd></div>
@@ -535,7 +554,7 @@ function CandidateTable({
   return (
     <div className="candidate-table-wrap">
       <table className="candidate-table">
-        <thead><tr><th>节点</th><th>端点</th><th>VPN Gate 指标</th><th>负载</th><th>持续在线</th><th><span className="sr-only">操作</span></th></tr></thead>
+        <thead><tr><th>节点</th><th>端点</th><th>延迟与评分</th><th>网速</th><th>负载</th><th><span className="sr-only">操作</span></th></tr></thead>
         <tbody>
           {candidates.map((candidate) => {
             const active = candidate.id === activeNodeId;
@@ -552,8 +571,8 @@ function CandidateTable({
                 </td>
                 <td><span className="protocol">{candidate.transport.toUpperCase()}</span> {candidate.port}</td>
                 <td><div className="metric-pair"><strong>{candidate.measured_latency_ms != null ? `实测 ${Math.round(candidate.measured_latency_ms)} ms` : candidate.api_ping_ms != null ? `API ${candidate.api_ping_ms} ms` : "--"}</strong><span>{candidate.quality_score != null ? `评分 ${candidate.quality_score.toFixed(1)} · 成功 ${Math.round((candidate.availability_24h ?? 0) * 100)}%` : formatSpeed(candidate.api_speed_bps)}</span></div></td>
-                <td>{candidate.sessions} 会话</td>
-                <td>{formatDuration(candidate.uptime_ms)}</td>
+                <td><div className="metric-pair"><strong>{candidate.measured_throughput_mbps != null ? `${candidate.measured_throughput_mbps.toFixed(1)} Mbps` : formatSpeed(candidate.api_speed_bps)}</strong><span>{candidate.measured_throughput_mbps != null ? `API ${formatSpeed(candidate.api_speed_bps)}` : "VPN Gate 标称"}</span></div></td>
+                <td><div className="metric-pair"><strong>{candidate.sessions} 会话</strong><span>在线 {formatDuration(candidate.uptime_ms)}</span></div></td>
                 <td className="candidate-actions">
                   <div className="candidate-action-set">
                     <button aria-label={`测试 ${candidate.ip}`} className="icon-button" disabled={busy} onClick={() => onProbe(candidate)} title="仅测试此候选" type="button"><Gauge size={17} /></button>
@@ -566,6 +585,107 @@ function CandidateTable({
         </tbody>
       </table>
     </div>
+  );
+}
+
+const CANDIDATE_SORT_OPTIONS: Array<{ value: CandidateSortKey; label: string }> = [
+  { value: "recommended", label: "推荐评分（高到低）" },
+  { value: "ip", label: "IP 地址（小到大）" },
+  { value: "api_speed", label: "API 网速（高到低）" },
+  { value: "measured_speed", label: "实测网速（高到低）" },
+  { value: "latency", label: "延迟（低到高）" },
+  { value: "availability", label: "可用率（高到低）" },
+];
+
+function CandidateDialog({
+  region,
+  candidates,
+  loading,
+  error,
+  busy,
+  onClose,
+  onRetry,
+  onProbe,
+  onSwitch,
+}: {
+  region: Region | null;
+  candidates: Candidate[];
+  loading: boolean;
+  error: unknown;
+  busy: boolean;
+  onClose: () => void;
+  onRetry: () => void;
+  onProbe: (candidate: Candidate) => void;
+  onSwitch: (candidate: Candidate) => void;
+}) {
+  const ref = useRef<HTMLDialogElement>(null);
+  const [query, setQuery] = useState("");
+  const [sortKey, setSortKey] = useState<CandidateSortKey>("recommended");
+  useEffect(() => {
+    const dialog = ref.current;
+    if (region && dialog && !dialog.open) dialog.showModal();
+    if (!region && dialog?.open) dialog.close();
+    if (region) {
+      setQuery("");
+      setSortKey("recommended");
+    }
+  }, [region]);
+  const visibleCandidates = useMemo(
+    () => filterAndSortCandidates(candidates, query, sortKey),
+    [candidates, query, sortKey],
+  );
+
+  return (
+    <dialog
+      className="candidate-dialog"
+      onCancel={(event) => { event.preventDefault(); onClose(); }}
+      ref={ref}
+    >
+      <div className="dialog-heading candidate-dialog__heading">
+        <div>
+          <Waypoints size={20} />
+          <div><h2>{region ? `${entryLabel(region)}候选出口` : "候选出口"}</h2><small>{region ? `固定端口 ${region.socks_port}` : "--"}</small></div>
+        </div>
+        <button aria-label="关闭候选出口" className="icon-button" onClick={onClose} title="关闭" type="button"><X size={18} /></button>
+      </div>
+      <div className="candidate-toolbar">
+        <label className="candidate-search">
+          <Search aria-hidden="true" size={17} />
+          <span className="sr-only">搜索 IP</span>
+          <input
+            autoFocus
+            inputMode="search"
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="搜索 IP 地址"
+            type="search"
+            value={query}
+          />
+        </label>
+        <label className="candidate-sort">
+          <ArrowUpDown aria-hidden="true" size={16} />
+          <span className="sr-only">候选排序</span>
+          <select onChange={(event) => setSortKey(event.target.value as CandidateSortKey)} value={sortKey}>
+            {CANDIDATE_SORT_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+          </select>
+        </label>
+        <span className="candidate-result-count">{visibleCandidates.length} / {candidates.length} 个节点</span>
+      </div>
+      <div className="candidate-dialog__body">
+        {loading ? <SkeletonRows count={7} /> : error ? (
+          <div className="empty-state"><CircleAlert size={24} /><strong>候选节点加载失败</strong><span>{errorMessage(error)}</span><button className="button button--secondary" onClick={onRetry} type="button"><RefreshCw size={16} />重新加载</button></div>
+        ) : visibleCandidates.length === 0 && query ? (
+          <div className="empty-state"><Search size={24} /><strong>没有匹配的 IP</strong><span>请检查输入，或清空搜索条件查看全部候选出口。</span><button className="button button--secondary" onClick={() => setQuery("")} type="button">清空搜索</button></div>
+        ) : (
+          <CandidateTable
+            activeNodeId={region?.active_node_id ?? null}
+            busy={busy || region?.mode === "disabled"}
+            candidates={visibleCandidates}
+            onProbe={onProbe}
+            onSwitch={onSwitch}
+          />
+        )}
+      </div>
+    </dialog>
   );
 }
 
@@ -678,11 +798,113 @@ function DisableRegionDialog({
   );
 }
 
-function ConsoleView({ session, onLogout }: { session: SessionState; onLogout: () => void }) {
+function ChangePasswordDialog({
+  open,
+  onClose,
+  onChanged,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onChanged: (session: SessionState) => void;
+}) {
+  const ref = useRef<HTMLDialogElement>(null);
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmation, setConfirmation] = useState("");
+  const [showPasswords, setShowPasswords] = useState(false);
+  const [validationError, setValidationError] = useState<string | null>(null);
+  const mutation = useMutation({
+    mutationFn: () => gateApi.changePassword(currentPassword, newPassword),
+    onSuccess: (session) => {
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmation("");
+      setValidationError(null);
+      onChanged(session);
+    },
+  });
+
+  useEffect(() => {
+    const dialog = ref.current;
+    if (open && dialog && !dialog.open) dialog.showModal();
+    if (!open && dialog?.open) dialog.close();
+  }, [open]);
+
+  const close = () => {
+    if (mutation.isPending) return;
+    setValidationError(null);
+    mutation.reset();
+    onClose();
+  };
+
+  return (
+    <dialog className="switch-dialog password-dialog" onCancel={(event) => { event.preventDefault(); close(); }} ref={ref}>
+      <div className="dialog-heading">
+        <div><KeyRound size={20} /><h2>修改管理密码</h2></div>
+        <button aria-label="关闭密码设置" className="icon-button" disabled={mutation.isPending} onClick={close} title="关闭" type="button"><X size={18} /></button>
+      </div>
+      <form
+        className="password-form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          mutation.reset();
+          if (newPassword.length < 12) {
+            setValidationError("新密码至少需要 12 个字符");
+            return;
+          }
+          if (currentPassword === newPassword) {
+            setValidationError("新密码不能与当前密码相同");
+            return;
+          }
+          if (newPassword !== confirmation) {
+            setValidationError("两次输入的新密码不一致");
+            return;
+          }
+          setValidationError(null);
+          mutation.mutate();
+        }}
+      >
+        <label htmlFor="current-password">当前密码</label>
+        <input autoComplete="current-password" autoFocus id="current-password" maxLength={1024} onChange={(event) => setCurrentPassword(event.target.value)} type={showPasswords ? "text" : "password"} value={currentPassword} />
+        <label htmlFor="new-password">新密码</label>
+        <input aria-describedby="new-password-hint" autoComplete="new-password" id="new-password" maxLength={1024} onChange={(event) => setNewPassword(event.target.value)} type={showPasswords ? "text" : "password"} value={newPassword} />
+        <small id="new-password-hint">至少 12 个字符</small>
+        <label htmlFor="confirm-password">确认新密码</label>
+        <input autoComplete="new-password" id="confirm-password" maxLength={1024} onChange={(event) => setConfirmation(event.target.value)} type={showPasswords ? "text" : "password"} value={confirmation} />
+        <label className="password-visibility" htmlFor="show-passwords">
+          <input checked={showPasswords} id="show-passwords" onChange={(event) => setShowPasswords(event.target.checked)} type="checkbox" />
+          {showPasswords ? <EyeOff aria-hidden="true" size={15} /> : <Eye aria-hidden="true" size={15} />}
+          显示密码
+        </label>
+        {(validationError || mutation.isError) ? <p className="form-error" role="alert"><CircleAlert size={16} />{validationError ?? errorMessage(mutation.error)}</p> : null}
+        <p className="password-session-note"><ShieldCheck size={15} />保存后，其他浏览器中的登录会话会立即失效。</p>
+        <div className="dialog-actions">
+          <button className="button button--secondary" disabled={mutation.isPending} onClick={close} type="button">取消</button>
+          <button className="button button--primary" disabled={!currentPassword || !newPassword || !confirmation || mutation.isPending} type="submit">
+            {mutation.isPending ? <LoaderCircle className="spin" size={16} /> : <KeyRound size={16} />}
+            {mutation.isPending ? "正在保存" : "保存新密码"}
+          </button>
+        </div>
+      </form>
+    </dialog>
+  );
+}
+
+function ConsoleView({
+  session,
+  onLogout,
+  onSessionChange,
+}: {
+  session: SessionState;
+  onLogout: () => void;
+  onSessionChange: (session: SessionState) => void;
+}) {
   const queryClient = useQueryClient();
   const [params, setParams] = useSearchParams();
   const [switchTarget, setSwitchTarget] = useState<Candidate | null>(null);
   const [disableTarget, setDisableTarget] = useState<Region | null>(null);
+  const [candidateOpen, setCandidateOpen] = useState(false);
+  const [passwordOpen, setPasswordOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const streamState = useGateStream(session.authenticated);
   const regionsQuery = useQuery({ queryKey: ["regions"], queryFn: gateApi.regions, refetchInterval: 10_000 });
@@ -693,7 +915,8 @@ function ConsoleView({ session, onLogout }: { session: SessionState; onLogout: (
   const jobs = jobsQuery.data ?? [];
   const slots = slotsQuery.data ?? [];
   const selectedId = params.get("region") ?? regions[0]?.id ?? null;
-  const tab = params.get("view") ?? "candidates";
+  const requestedView = params.get("view");
+  const view = requestedView === "jobs" || requestedView === "events" ? requestedView : "routes";
   const selectedRegion = regions.find((region) => region.id === selectedId) ?? null;
   const candidatesQuery = useQuery({ queryKey: ["candidates", selectedId], queryFn: () => gateApi.candidates(selectedId!), enabled: Boolean(selectedId) });
   const candidates = candidatesQuery.data ?? [];
@@ -745,6 +968,7 @@ function ConsoleView({ session, onLogout }: { session: SessionState; onLogout: (
     mutationFn: ({ regionId, nodeId }: { regionId: string; nodeId: number }) => gateApi.switchCandidate(regionId, nodeId),
     onSuccess: () => {
       setSwitchTarget(null);
+      setCandidateOpen(false);
       setNotice("切换任务已提交；旧线路会保持到新出口验证成功");
       void queryClient.invalidateQueries({ queryKey: ["jobs"] });
     },
@@ -767,8 +991,12 @@ function ConsoleView({ session, onLogout }: { session: SessionState; onLogout: (
   const mutationError = refreshMutation.error ?? probeMutation.error ?? candidateProbeMutation.error ?? modeMutation.error ?? switchMutation.error ?? reconnectMutation.error ?? cancelMutation.error;
   const enabledRegions = useMemo(() => regions.filter((region) => region.mode !== "disabled"), [regions]);
   const liveRegions = useMemo(() => enabledRegions.filter((region) => region.status === "healthy").length, [enabledRegions]);
-  const selectRegion = (id: string) => setParams((current) => { current.set("region", id); return current; });
-  const selectTab = (value: string) => setParams((current) => { current.set("view", value); return current; });
+  const runningJobs = useMemo(() => jobs.filter((job) => ["queued", "running"].includes(job.status)).length, [jobs]);
+  const selectRegion = (id: string) => setParams((current) => { current.set("region", id); current.set("view", "routes"); return current; });
+  const selectView = (value: "routes" | "jobs" | "events") => {
+    setCandidateOpen(false);
+    setParams((current) => { current.set("view", value); return current; });
+  };
   const toggleRegion = (region: Region) => {
     if (region.mode === "disabled") {
       modeMutation.mutate({ regionId: region.id, mode: "auto" });
@@ -781,43 +1009,56 @@ function ConsoleView({ session, onLogout }: { session: SessionState; onLogout: (
     <div className="app-shell">
       <header className="command-bar">
         <div className="brand-lockup brand-lockup--bar"><span className="brand-mark"><Network size={20} /></span><span>GATE</span><small>出口控制台</small></div>
-        <div className="command-status">
-          <span className={`stream-state stream-state--${streamState}`}><i />{streamState === "live" ? "事件流在线" : streamState === "connecting" ? "连接事件流" : "事件流重连中"}</span>
-          <span className="system-count"><ShieldCheck size={15} />{liveRegions}/{enabledRegions.length} 个已启用入口健康</span>
-        </div>
+        <nav aria-label="主导航" className="primary-nav">
+          <button aria-current={view === "routes" ? "page" : undefined} onClick={() => selectView("routes")} type="button"><Waypoints size={16} />出口</button>
+          <button aria-current={view === "jobs" ? "page" : undefined} onClick={() => selectView("jobs")} type="button"><ListTodo size={16} />任务{runningJobs > 0 ? <span>{runningJobs}</span> : null}</button>
+          <button aria-current={view === "events" ? "page" : undefined} onClick={() => selectView("events")} type="button"><Activity size={16} />事件</button>
+        </nav>
         <div className="command-actions">
           <button className="button button--dark" disabled={refreshMutation.isPending} onClick={() => refreshMutation.mutate()} type="button">{refreshMutation.isPending ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}{refreshMutation.isPending ? "正在发现" : "刷新节点"}</button>
+          {session.security_enabled ? <button aria-label="修改管理密码" className="icon-button icon-button--dark" onClick={() => setPasswordOpen(true)} title="修改管理密码" type="button"><KeyRound size={17} /></button> : null}
           <button aria-label="退出登录" className="icon-button icon-button--dark" onClick={onLogout} title="退出登录" type="button"><LogOut size={17} /></button>
         </div>
       </header>
+
+      <div className="system-strip">
+        <span className={`stream-state stream-state--${streamState}`}><i />{streamState === "live" ? "事件流在线" : streamState === "connecting" ? "连接事件流" : "事件流重连中"}</span>
+        <span className="system-count"><ShieldCheck size={15} />{liveRegions}/{enabledRegions.length} 个已启用入口健康</span>
+      </div>
 
       {regionsQuery.isLoading ? <div className="page-loading"><SkeletonRows count={5} /></div> : regionsQuery.isError ? (
         <main className="fatal-state"><CircleAlert size={28} /><h1>控制面暂时不可用</h1><p>{errorMessage(regionsQuery.error)}</p><button className="button button--primary" onClick={() => void regionsQuery.refetch()} type="button"><RefreshCw size={16} />重新连接</button></main>
       ) : (
         <>
-          <PortRail onSelect={selectRegion} regions={regions} selectedId={selectedId} />
           {(notice || mutationError) ? <div className={`notice ${mutationError ? "notice--error" : ""}`} role={mutationError ? "alert" : "status"}><span>{mutationError ? <CircleAlert size={16} /> : <CircleCheck size={16} />}{mutationError ? errorMessage(mutationError) : notice}</span><button aria-label="关闭通知" className="icon-button" onClick={() => { setNotice(null); refreshMutation.reset(); probeMutation.reset(); candidateProbeMutation.reset(); modeMutation.reset(); switchMutation.reset(); reconnectMutation.reset(); cancelMutation.reset(); }} type="button"><X size={15} /></button></div> : null}
-          <main className="workspace">
-            <section className="routes-panel" aria-labelledby="routes-title">
-              <div className="section-heading"><div><h1 id="routes-title">地区入口</h1><p>同一地区可开启多个固定端口, 每个端口使用互不重复的真实出口。</p></div><span className="last-sync"><Clock3 size={14} />{formatTime(regions[0]?.updated_at)}</span></div>
-              <RegionTable jobs={jobs} modePendingRegionId={modeMutation.isPending ? modeMutation.variables?.regionId ?? null : null} onSelect={selectRegion} onToggle={toggleRegion} regions={regions} runtimeUnavailable={slotsQuery.isError} selectedId={selectedId} slots={slots} />
-            </section>
-            {selectedRegion ? <RegionInspector activeCandidate={activeCandidate} activeJob={activeJob} modePending={modeMutation.isPending && modeMutation.variables?.regionId === selectedRegion.id} onMode={(mode) => modeMutation.mutate({ regionId: selectedRegion.id, mode })} onProbe={() => probeMutation.mutate(selectedRegion.id)} onReconnect={() => reconnectMutation.mutate(selectedRegion.id)} onToggle={() => toggleRegion(selectedRegion)} probePending={probeMutation.isPending} reconnectPending={reconnectMutation.isPending} region={selectedRegion} runtimeUnavailable={slotsQuery.isError} slots={selectedSlots} /> : null}
-          </main>
-          <section className="detail-bay">
-            <div className="detail-tabs" role="tablist" aria-label="线路详情">
-              <button aria-selected={tab === "candidates"} onClick={() => selectTab("candidates")} role="tab" type="button"><Radio size={15} />候选节点 <span>{candidates.length}</span></button>
-              <button aria-selected={tab === "jobs"} onClick={() => selectTab("jobs")} role="tab" type="button"><ServerCog size={15} />任务 <span>{jobs.length}</span></button>
-              <button aria-selected={tab === "events"} onClick={() => selectTab("events")} role="tab" type="button"><Activity size={15} />事件 <span>{eventsQuery.data?.length ?? 0}</span></button>
-            </div>
-            <div className="detail-content" role="tabpanel">
-              {tab === "candidates" ? (candidatesQuery.isLoading ? <SkeletonRows count={5} /> : <CandidateTable activeNodeId={selectedRegion?.active_node_id ?? null} busy={selectedRegion?.mode === "disabled" || Boolean(activeJob) || switchMutation.isPending || candidateProbeMutation.isPending} candidates={candidates} onProbe={(candidate) => { if (selectedRegion) candidateProbeMutation.mutate({ regionId: selectedRegion.id, nodeId: candidate.id }); }} onSwitch={setSwitchTarget} />) : tab === "jobs" ? <JobsView cancellingId={cancelMutation.isPending ? cancelMutation.variables ?? null : null} jobs={jobs} onCancel={(jobId) => cancelMutation.mutate(jobId)} regions={regions} /> : <EventsView events={eventsQuery.data ?? []} regions={regions} />}
-            </div>
-          </section>
+          {view === "routes" ? (
+            <>
+              <PortRail onSelect={selectRegion} regions={regions} selectedId={selectedId} />
+              <main className="workspace">
+                <section className="routes-panel" aria-labelledby="routes-title">
+                  <div className="section-heading"><div><h1 id="routes-title">地区入口</h1><p>同一地区可开启多个固定端口，每个端口使用互不重复的真实出口。</p></div><span className="last-sync"><Clock3 size={14} />{formatTime(regions[0]?.updated_at)}</span></div>
+                  <RegionTable jobs={jobs} modePendingRegionId={modeMutation.isPending ? modeMutation.variables?.regionId ?? null : null} onSelect={selectRegion} onToggle={toggleRegion} regions={regions} runtimeUnavailable={slotsQuery.isError} selectedId={selectedId} slots={slots} />
+                </section>
+                {selectedRegion ? <RegionInspector activeCandidate={activeCandidate} activeJob={activeJob} modePending={modeMutation.isPending && modeMutation.variables?.regionId === selectedRegion.id} onCandidates={() => setCandidateOpen(true)} onMode={(mode) => modeMutation.mutate({ regionId: selectedRegion.id, mode })} onProbe={() => probeMutation.mutate(selectedRegion.id)} onReconnect={() => reconnectMutation.mutate(selectedRegion.id)} onToggle={() => toggleRegion(selectedRegion)} probePending={probeMutation.isPending} reconnectPending={reconnectMutation.isPending} region={selectedRegion} runtimeUnavailable={slotsQuery.isError} slots={selectedSlots} /> : null}
+              </main>
+            </>
+          ) : view === "jobs" ? (
+            <main className="activity-page" aria-labelledby="jobs-title">
+              <div className="section-heading"><div><h1 id="jobs-title">控制任务</h1><p>查看测试、切换和自动维护的执行结果。</p></div><span className="record-count">{jobs.length} 条记录</span></div>
+              {jobsQuery.isLoading ? <SkeletonRows count={7} /> : jobsQuery.isError ? <div className="empty-state"><CircleAlert size={24} /><strong>任务记录加载失败</strong><button className="button button--secondary" onClick={() => void jobsQuery.refetch()} type="button"><RefreshCw size={16} />重新加载</button></div> : <JobsView cancellingId={cancelMutation.isPending ? cancelMutation.variables ?? null : null} jobs={jobs} onCancel={(jobId) => cancelMutation.mutate(jobId)} regions={regions} />}
+            </main>
+          ) : (
+            <main className="activity-page" aria-labelledby="events-title">
+              <div className="section-heading"><div><h1 id="events-title">运行事件</h1><p>按时间查看线路状态变化和异常原因。</p></div><span className="record-count">{eventsQuery.data?.length ?? 0} 条记录</span></div>
+              {eventsQuery.isLoading ? <SkeletonRows count={7} /> : eventsQuery.isError ? <div className="empty-state"><CircleAlert size={24} /><strong>事件记录加载失败</strong><button className="button button--secondary" onClick={() => void eventsQuery.refetch()} type="button"><RefreshCw size={16} />重新加载</button></div> : <EventsView events={eventsQuery.data ?? []} regions={regions} />}
+            </main>
+          )}
         </>
       )}
+      <CandidateDialog busy={Boolean(activeJob) || switchMutation.isPending || candidateProbeMutation.isPending} candidates={candidates} error={candidatesQuery.error} loading={candidatesQuery.isLoading} onClose={() => setCandidateOpen(false)} onProbe={(candidate) => { if (selectedRegion) candidateProbeMutation.mutate({ regionId: selectedRegion.id, nodeId: candidate.id }); }} onRetry={() => void candidatesQuery.refetch()} onSwitch={setSwitchTarget} region={candidateOpen ? selectedRegion : null} />
       <SwitchDialog busy={switchMutation.isPending} candidate={switchTarget} onCancel={() => setSwitchTarget(null)} onConfirm={() => { if (selectedRegion && switchTarget) switchMutation.mutate({ regionId: selectedRegion.id, nodeId: switchTarget.id }); }} region={selectedRegion} />
       <DisableRegionDialog busy={modeMutation.isPending && modeMutation.variables?.mode === "disabled"} onCancel={() => setDisableTarget(null)} onConfirm={() => { if (disableTarget) modeMutation.mutate({ regionId: disableTarget.id, mode: "disabled" }); }} region={disableTarget} />
+      <ChangePasswordDialog onChanged={(updatedSession) => { onSessionChange(updatedSession); setPasswordOpen(false); setNotice("管理密码已修改，其他登录会话已失效"); void queryClient.invalidateQueries({ queryKey: ["events"] }); }} onClose={() => setPasswordOpen(false)} open={passwordOpen} />
     </div>
   );
 }
@@ -830,7 +1071,7 @@ export default function App() {
     onSuccess: () => {
       setCsrfToken(null);
       queryClient.clear();
-      void queryClient.setQueryData(["session"], { authenticated: false, csrf_token: null, expires_at: null });
+      void queryClient.setQueryData(["session"], { authenticated: false, security_enabled: true, csrf_token: null, expires_at: null });
     },
   });
   useEffect(() => setCsrfToken(sessionQuery.data?.csrf_token ?? null), [sessionQuery.data]);
@@ -838,5 +1079,5 @@ export default function App() {
   if (sessionQuery.isLoading) return <div className="boot-screen" role="status"><span className="brand-mark"><Network size={24} /></span><LoaderCircle className="spin" size={20} /><span>正在连接 Gate</span></div>;
   if (sessionQuery.isError) return <main className="fatal-state fatal-state--fullscreen"><CircleAlert size={30} /><h1>无法连接 Gate</h1><p>{errorMessage(sessionQuery.error)}</p><button className="button button--primary" onClick={() => void sessionQuery.refetch()} type="button"><RefreshCw size={16} />重新连接</button></main>;
   if (!sessionQuery.data?.authenticated) return <LoginView onAuthenticated={(value) => { setCsrfToken(value.csrf_token); queryClient.setQueryData(["session"], value); }} />;
-  return <ConsoleView onLogout={() => logoutMutation.mutate()} session={sessionQuery.data} />;
+  return <ConsoleView onLogout={() => logoutMutation.mutate()} onSessionChange={(value) => { setCsrfToken(value.csrf_token); queryClient.setQueryData(["session"], value); }} session={sessionQuery.data} />;
 }

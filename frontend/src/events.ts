@@ -19,6 +19,7 @@ const EVENT_TITLES: Record<string, string> = {
   RECONCILE_DUPLICATE_EXIT: "检测到重复出口",
   RECONCILE_REJECTED_ACTIVE_SLOT: "启动校验未通过",
   RECONCILE_VERIFIED_ACTIVE_SLOT: "启动校验通过",
+  SECURITY_PASSWORD_CHANGED: "管理密码已修改",
   SWITCH_COMPLETED: "线路切换完成",
   SWITCH_ROLLED_BACK: "线路切换已回退",
 };
@@ -42,6 +43,7 @@ const EVENT_FALLBACKS: Record<string, string> = {
   RECONCILE_DUPLICATE_EXIT: "同地区入口使用了相同的真实出口, 后接入的入口已关闭。",
   RECONCILE_REJECTED_ACTIVE_SLOT: "活动隧道未通过启动校验, 已停止转发。",
   RECONCILE_VERIFIED_ACTIVE_SLOT: "活动隧道已通过启动校验并恢复转发。",
+  SECURITY_PASSWORD_CHANGED: "管理员密码已更新，其他浏览器中的登录会话已失效。",
   SWITCH_COMPLETED: "新出口已通过验证, 固定端口已完成切换。",
   SWITCH_ROLLED_BACK: "新出口未通过验证, 固定端口已恢复原线路。",
 };

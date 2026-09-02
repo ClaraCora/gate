@@ -258,38 +258,24 @@ v0.1 是唯一基线：空数据库由 SQLAlchemy `create_all` 创建，适合�
 
 ## 10. 凭据轮换
 
-在 VPS 交互式 shell 中执行，避免管理员密码进入 PowerShell 历史或 SSH 命令行：
+已登录时从 WebUI 右上角的钥匙按钮修改密码。新 Argon2 散列和会话密钥会持久化到 Gate
+数据库，环境文件中的凭据只作为首次安装引导值。修改后当前浏览器会得到新会话，其他浏览器
+中的旧会话立即失效。
+
+无法登录时，在交互式 SSH shell 中停止 API，再以 `gate` 用户运行恢复命令：
 
 ```powershell
 ssh -t HK-Aliyun
 ```
 
-然后在 VPS 上：
-
 ```sh
-set -eu
-cp -a /etc/gate/secrets.env /etc/gate/secrets.env.before-rotation
-printf 'New Gate administrator password: ' >&2
-stty -echo
-IFS= read -r gate_new_password
-stty echo
-printf '\n' >&2
-gate_new_hash="$(printf '%s\n' "$gate_new_password" | /opt/gate/current/.venv/bin/gate-password-hash)"
-unset gate_new_password
-gate_new_session_secret="$(openssl rand -hex 32)"
-umask 077
-{
-  printf 'GATE_ADMIN_PASSWORD_HASH=%s\n' "$gate_new_hash"
-  printf 'GATE_SESSION_SECRET=%s\n' "$gate_new_session_secret"
-} >/etc/gate/secrets.env.new
-chown root:gate-worker /etc/gate/secrets.env.new
-chmod 0640 /etc/gate/secrets.env.new
-mv -f /etc/gate/secrets.env.new /etc/gate/secrets.env
-systemctl restart gate-api
+systemctl stop gate-api
+runuser -u gate -- sh -c 'cd /var/lib/gate && GATE_CONFIG=/etc/gate/config.yaml /opt/gate/current/.venv/bin/gate-password-reset'
+systemctl start gate-api
+curl --fail http://127.0.0.1:18080/api/v1/health/ready
 ```
 
-同时轮换 session secret 会立即注销所有浏览器会话。验证新密码后删除
-`/etc/gate/secrets.env.before-rotation`；验证失败则恢复该文件并重启 `gate-api`。
+命令要求输入并确认至少 12 个字符的新密码，不会把明文写入命令历史。
 
 ## 11. 发布回滚
 
@@ -379,11 +365,12 @@ ssh HK-Aliyun "systemd-cgtop -b -n 1 | grep -E 'gate|haproxy' || true; systemctl
 
 ## 15. 卸载
 
-卸载会移除运行状态，执行前必须备份。推荐先通过 WebUI 停用全部地区，然后：
+使用内置脚本停止服务、清理 network namespace 和 Gate 防火墙规则、恢复原 HAProxy 配置并
+删除程序文件。默认保留配置和数据库，执行前仍会自动备份：
 
 ```powershell
-ssh HK-Aliyun "systemctl disable --now gate-api gate-worker gate-firewall haproxy; systemctl daemon-reload"
+ssh HK-Aliyun "sh /opt/gate/current/deploy/uninstall.sh --yes"
 ```
 
-数据和凭据目录不自动删除。确认备份有效后再由管理员明确处理 `/opt/gate`、`/var/lib/gate`、
-`/etc/gate` 及 Gate 安装的 systemd 文件。
+需要同时清除配置、数据库、凭据和 Gate 服务账号时增加 `--purge-data`。完整行为、验证方法和
+重装步骤见[部署与卸载教程](DEPLOYMENT.md)。

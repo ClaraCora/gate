@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import base64
+import getpass
 import hashlib
 import hmac
 import json
@@ -63,6 +65,13 @@ class SessionManager:
         except (InvalidHashError, VerificationError, VerifyMismatchError):
             return False
 
+    def hash_password(self, password: str) -> str:
+        return self.password_hasher.hash(password)
+
+    def replace_credentials(self, password_hash: str, session_secret: str) -> None:
+        self.password_hash = password_hash
+        self.session_secret = session_secret.encode("utf-8")
+
     def issue(self, now: datetime | None = None) -> tuple[str, SessionData]:
         if not self.configured or self.session_secret is None:
             raise SessionError("authentication is not configured")
@@ -115,3 +124,33 @@ def hash_password_main() -> None:
     if len(password) < 12:
         raise SystemExit("Password must contain at least 12 characters")
     print(PasswordHasher().hash(password))
+
+
+def reset_password_main() -> None:
+    if sys.stdin.isatty():
+        password = getpass.getpass("New Gate administrator password: ")
+        confirmation = getpass.getpass("Confirm new password: ")
+        if password != confirmation:
+            raise SystemExit("Passwords do not match")
+    else:
+        password = sys.stdin.readline().rstrip("\r\n")
+    if len(password) < 12:
+        raise SystemExit("Password must contain at least 12 characters")
+
+    async def persist() -> None:
+        from gate.config import load_settings
+        from gate.database import Database
+
+        settings = load_settings()
+        database = Database(settings.database.url)
+        try:
+            await database.initialize(settings.regions)
+            await database.set_security_credentials(
+                PasswordHasher().hash(password),
+                secrets.token_urlsafe(48),
+            )
+        finally:
+            await database.close()
+
+    asyncio.run(persist())
+    print("Gate administrator password has been reset. Restart gate-api.service.")

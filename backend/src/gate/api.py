@@ -24,6 +24,7 @@ from gate.errors import GateError
 from gate.probes import probe_socks_exit
 from gate.schemas import (
     CandidateResponse,
+    ChangePasswordRequest,
     DiscoveryResponse,
     EventResponse,
     HealthResponse,
@@ -100,6 +101,9 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await app_database.initialize(app_settings.regions)
+        stored_credentials = await app_database.get_security_credentials()
+        if stored_credentials is not None:
+            app_sessions.replace_credentials(*stored_credentials)
         await app_database.fail_interrupted_jobs()
         await app_database.cleanup_retention(**app_settings.retention.model_dump())
         if reconcile_on_startup:
@@ -129,6 +133,17 @@ def create_app(
     app.state.automation = app_automation
     app.state.worker = app_worker
     app.state.sessions = app_sessions
+
+    def set_session_cookie(response: Response, token: str) -> None:
+        response.set_cookie(
+            SESSION_COOKIE,
+            token,
+            max_age=app_settings.security.session_hours * 3600,
+            httponly=True,
+            secure=app_settings.security.cookie_secure,
+            samesite="strict",
+            path="/",
+        )
 
     public_read_paths = {
         "/api/v1/health/live",
@@ -340,13 +355,14 @@ def create_app(
     @app.get("/api/v1/session", response_model=SessionResponse)
     async def get_session(request: Request) -> SessionResponse:
         if not app_settings.security.enabled:
-            return SessionResponse(authenticated=True)
+            return SessionResponse(authenticated=True, security_enabled=False)
         try:
             session = app_sessions.decode(request.cookies.get(SESSION_COOKIE))
         except SessionError:
             return SessionResponse(authenticated=False)
         return SessionResponse(
             authenticated=True,
+            security_enabled=True,
             csrf_token=session.csrf_token,
             expires_at=session.expires_at,
         )
@@ -361,17 +377,41 @@ def create_app(
             await asyncio.sleep(0.25)
             raise HTTPException(status_code=401, detail="Invalid credentials")
         token, session = app_sessions.issue()
-        response.set_cookie(
-            SESSION_COOKIE,
-            token,
-            max_age=app_settings.security.session_hours * 3600,
-            httponly=True,
-            secure=app_settings.security.cookie_secure,
-            samesite="strict",
-            path="/",
-        )
+        set_session_cookie(response, token)
         return SessionResponse(
             authenticated=True,
+            security_enabled=True,
+            csrf_token=session.csrf_token,
+            expires_at=session.expires_at,
+        )
+
+    @app.put("/api/v1/session/password", response_model=SessionResponse)
+    async def change_password(
+        payload: ChangePasswordRequest,
+        response: Response,
+    ) -> SessionResponse:
+        if not app_settings.security.enabled:
+            raise HTTPException(status_code=409, detail="管理员认证未启用")
+        if not app_sessions.verify_password(payload.current_password):
+            await asyncio.sleep(0.25)
+            raise HTTPException(status_code=400, detail="当前密码不正确")
+        if len(payload.new_password) < 12:
+            raise HTTPException(status_code=422, detail="新密码至少需要 12 个字符")
+        if secrets.compare_digest(payload.current_password, payload.new_password):
+            raise HTTPException(status_code=422, detail="新密码不能与当前密码相同")
+
+        password_hash = await asyncio.to_thread(
+            app_sessions.hash_password,
+            payload.new_password,
+        )
+        session_secret = secrets.token_urlsafe(48)
+        await app_database.set_security_credentials(password_hash, session_secret)
+        app_sessions.replace_credentials(password_hash, session_secret)
+        token, session = app_sessions.issue()
+        set_session_cookie(response, token)
+        return SessionResponse(
+            authenticated=True,
+            security_enabled=True,
             csrf_token=session.csrf_token,
             expires_at=session.expires_at,
         )

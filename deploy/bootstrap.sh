@@ -5,6 +5,19 @@ if [ "$(id -u)" -ne 0 ]; then
     echo "bootstrap.sh must run as root" >&2
     exit 1
 fi
+if [ ! -r /etc/os-release ]; then
+    echo "Unable to identify the operating system" >&2
+    exit 2
+fi
+. /etc/os-release
+case "${ID:-}:${VERSION_ID:-}" in
+    debian:13*) ;;
+    *) echo "Gate bootstrap currently requires Debian 13" >&2; exit 2 ;;
+esac
+if [ "$(dpkg --print-architecture)" != "amd64" ]; then
+    echo "Gate bootstrap currently requires the amd64 architecture" >&2
+    exit 2
+fi
 
 SING_BOX_VERSION=1.14.0
 SING_BOX_SHA256=84035ea7eb85570830af77801e8e949d3769dd23bbcacce08df3bfde1945f299

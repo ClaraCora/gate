@@ -20,8 +20,14 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=1024)
 
 
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=1024)
+    new_password: str = Field(min_length=1, max_length=1024)
+
+
 class SessionResponse(BaseModel):
     authenticated: bool
+    security_enabled: bool = True
     csrf_token: str | None = None
     expires_at: datetime | None = None
 

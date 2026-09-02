@@ -74,9 +74,17 @@ export const gateApi = {
       body: JSON.stringify({ password }),
     }),
   logout: () => request<void>("/api/v1/session", { method: "DELETE" }),
+  changePassword: (currentPassword: string, newPassword: string) =>
+    request<SessionState>("/api/v1/session/password", {
+      method: "PUT",
+      body: JSON.stringify({
+        current_password: currentPassword,
+        new_password: newPassword,
+      }),
+    }),
   regions: () => request<Region[]>("/api/v1/regions"),
   candidates: (regionId: string) =>
-    request<Candidate[]>(`/api/v1/regions/${regionId}/candidates?limit=100`),
+    request<Candidate[]>(`/api/v1/regions/${regionId}/candidates?limit=500`),
   slots: () => request<RuntimeSlot[]>("/api/v1/runtime/slots"),
   jobs: () => request<Job[]>("/api/v1/jobs?limit=80"),
   events: () => request<GateEvent[]>("/api/v1/events?limit=120"),
