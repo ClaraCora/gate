@@ -9,6 +9,7 @@ User=gate
 Group=gate-worker
 WorkingDirectory=/var/lib/gate
 Environment=GATE_CONFIG=/etc/gate/config.yaml
+Environment=GATE_SOCKS_AUTH_FILE=/etc/gate/socks-auth.json
 Environment=GATE_WEB_ROOT=/opt/gate/current/frontend/dist
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=-/etc/gate/secrets.env

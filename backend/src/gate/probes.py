@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from urllib.parse import quote
 
 import httpx
 
@@ -28,14 +29,30 @@ def parse_cloudflare_trace(payload: str) -> dict[str, str]:
     return values
 
 
+def socks_proxy_url(
+    host: str,
+    port: int,
+    *,
+    username: str | None = None,
+    password: str | None = None,
+) -> str:
+    authority = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    credentials = ""
+    if username is not None:
+        credentials = f"{quote(username, safe='')}:{quote(password or '', safe='')}@"
+    return f"socks5://{credentials}{authority}:{port}"
+
+
 async def probe_socks_exit(
     host: str,
     port: int,
     *,
     expected_countries: set[str] | frozenset[str],
     timeout_seconds: float = 12.0,
+    username: str | None = None,
+    password: str | None = None,
 ) -> EgressProbe:
-    proxy = f"socks5://{host}:{port}"
+    proxy = socks_proxy_url(host, port, username=username, password=password)
     started = time.perf_counter()
     try:
         async with httpx.AsyncClient(

@@ -4,7 +4,7 @@ import base64
 
 import pytest
 from gate.profiles import sanitize_openvpn_profile
-from gate.worker_protocol import REQUEST_ADAPTER, ProvisionSlotRequest
+from gate.worker_protocol import REQUEST_ADAPTER, ProvisionSlotRequest, UpdateSocksAuthRequest
 from pydantic import ValidationError
 
 
@@ -63,3 +63,27 @@ def test_root_boundary_rejects_rehashed_dangerous_config(encoded_profile: str) -
     # The protocol accepts a self-consistent envelope; the network manager must
     # independently canonicalize the profile before any privileged operation.
     assert request.config_text != base64.b64decode(encoded_profile).decode()
+
+
+def test_socks_auth_request_validates_complete_effective_credentials() -> None:
+    request = REQUEST_ADAPTER.validate_python(
+        {
+            "action": "update_socks_auth",
+            "enabled": True,
+            "username": "gate_user",
+            "password": "strong!proxy#password",
+        }
+    )
+
+    assert isinstance(request, UpdateSocksAuthRequest)
+    assert request.password == "strong!proxy#password"
+
+    with pytest.raises(ValidationError, match="must not retain"):
+        REQUEST_ADAPTER.validate_python(
+            {
+                "action": "update_socks_auth",
+                "enabled": False,
+                "username": "gate_user",
+                "password": "strong!proxy#password",
+            }
+        )

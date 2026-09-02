@@ -11,7 +11,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from gate.commands import SubprocessCommandRunner
-from gate.config import load_settings
+from gate.config import default_socks_auth_path, load_settings
 from gate.errors import GateError
 from gate.network import ExecutablePaths, LinuxNetworkManager
 from gate.worker_protocol import (
@@ -21,6 +21,7 @@ from gate.worker_protocol import (
     InspectRequest,
     ProvisionSlotRequest,
     Request,
+    UpdateSocksAuthRequest,
     WorkerErrorResponse,
     WorkerResponse,
 )
@@ -56,6 +57,16 @@ class WorkerDispatcher:
                     "region_id": spec.region_id,
                     "slot": spec.slot,
                     "namespace": spec.namespace,
+                },
+            )
+        if isinstance(request, UpdateSocksAuthRequest):
+            auth = await self.manager.update_socks_auth(request)
+            return WorkerResponse(
+                ok=True,
+                data={
+                    "enabled": auth.enabled,
+                    "username": auth.username,
+                    "password_set": bool(auth.password),
                 },
             )
         raise AssertionError("unhandled worker request")
@@ -187,6 +198,8 @@ async def run_worker() -> None:
         ExecutablePaths.discover(),
         state_root=Path(os.environ.get("GATE_SLOT_ROOT", "/var/lib/gate/slots")),
         netns_config_root=Path(os.environ.get("GATE_NETNS_CONFIG_ROOT", "/etc/netns")),
+        socks_auth_path=default_socks_auth_path(),
+        socks_auth_gid=worker_gid,
     )
     server = WorkerServer(
         WorkerDispatcher(manager),

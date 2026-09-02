@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from gate.config import load_settings
+from gate.config import SocksAuthConfig, load_settings
 from gate.coordinator import SwitchCoordinator, SwitchError
 from gate.database import Database
 from gate.discovery import DiscoveryService
@@ -47,6 +47,7 @@ class ProbeSequence:
     def __init__(self, *results: EgressProbe) -> None:
         self.results = list(results)
         self.calls: list[tuple[str, int]] = []
+        self.credentials: list[tuple[str | None, str | None]] = []
 
     async def __call__(
         self,
@@ -55,9 +56,12 @@ class ProbeSequence:
         *,
         expected_countries: set[str] | frozenset[str],
         timeout_seconds: float = 12.0,
+        username: str | None = None,
+        password: str | None = None,
     ) -> EgressProbe:
         del expected_countries, timeout_seconds
         self.calls.append((host, port))
+        self.credentials.append((username, password))
         return self.results.pop(0)
 
 
@@ -120,6 +124,37 @@ async def test_switch_provisions_tests_and_commits_active_slot(
     region = await database.get_region("jp")
     assert active is not None and active.slot == "a" and active.node_id == node_id
     assert region is not None and region.status == RegionStatus.HEALTHY
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_switch_probes_use_current_socks_credentials(
+    tmp_path: Path, encoded_profile: str
+) -> None:
+    database, discovery, node_id = await _seed(tmp_path, encoded_profile)
+    probe = ProbeSequence(
+        EgressProbe("203.0.113.10", "JP", 110.0),
+        EgressProbe("203.0.113.10", "JP", 115.0),
+    )
+    coordinator = SwitchCoordinator(
+        database,
+        discovery,
+        worker=FakeWorker(),
+        haproxy=FakeHaProxy(),
+        probe=probe,
+        socks_auth=SocksAuthConfig(
+            enabled=True,
+            username="gate_user",
+            password="strong!proxy#password",
+        ),
+    )
+
+    await coordinator.switch("jp", node_id)
+
+    assert probe.credentials == [
+        ("gate_user", "strong!proxy#password"),
+        ("gate_user", "strong!proxy#password"),
+    ]
     await database.close()
 
 

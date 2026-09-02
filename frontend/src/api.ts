@@ -7,6 +7,8 @@ import type {
   RegionMode,
   RuntimeSlot,
   SessionState,
+  SocksAuthState,
+  SocksAuthUpdate,
 } from "./types";
 
 let csrfToken: string | null = null;
@@ -81,6 +83,12 @@ export const gateApi = {
         current_password: currentPassword,
         new_password: newPassword,
       }),
+    }),
+  socksAuth: () => request<SocksAuthState>("/api/v1/socks-auth"),
+  updateSocksAuth: (update: SocksAuthUpdate) =>
+    request<SocksAuthState>("/api/v1/socks-auth", {
+      method: "PUT",
+      body: JSON.stringify(update),
     }),
   regions: () => request<Region[]>("/api/v1/regions"),
   candidates: (regionId: string) =>

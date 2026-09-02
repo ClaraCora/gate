@@ -14,6 +14,18 @@ export interface SessionState {
   expires_at: string | null;
 }
 
+export interface SocksAuthState {
+  enabled: boolean;
+  username: string;
+  password_set: boolean;
+}
+
+export interface SocksAuthUpdate {
+  enabled: boolean;
+  username: string;
+  password: string | null;
+}
+
 export interface Region {
   id: string;
   group_id: string;

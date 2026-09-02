@@ -11,6 +11,7 @@ Windows 只用于 SSH 访问和端口转发。除非明确说明，VPS 命令需
 | `/opt/gate/releases/<release-id>` | 不可变发布目录，自动保留最近 3 个 |
 | `/etc/gate/config.yaml` | 非敏感运行配置 |
 | `/etc/gate/secrets.env` | Argon2 管理员密码散列和会话签名密钥 |
+| `/etc/gate/socks-auth.json` | 可选 SOCKS 统一凭据，`0640 root:gate-worker` |
 | `/etc/gate/firewall.env` | VPS 公网接口名 |
 | `/var/lib/gate/gate.db` | SQLite 主数据库 |
 | `/var/lib/gate/slots` | 净化后的 slot 运行材料 |
@@ -52,7 +53,7 @@ sh /tmp/gate-install.sh
 后续更新重新下载并执行同一命令。安装指定版本时使用：
 
 ```sh
-sh /tmp/gate-install.sh --version v0.1.2
+sh /tmp/gate-install.sh --version v0.1.3
 ```
 
 首次安装会在终端输出一次 `Gate WebUI initial admin password`。立即放入密码管理器；脚本只把
@@ -100,6 +101,9 @@ WebUI 位于 `http://127.0.0.1:18080`。应用应使用 `socks5h://127.0.0.1:<po
 curl.exe --fail --max-time 20 --proxy socks5h://127.0.0.1:11081 https://www.cloudflare.com/cdn-cgi/trace
 curl.exe --fail --max-time 20 --proxy socks5h://127.0.0.1:11082 https://www.cloudflare.com/cdn-cgi/trace
 ```
+
+启用 SOCKS 认证后增加 `--proxy-user gate_user`，curl 会交互提示代理密码。不要把密码直接写入
+命令行、脚本或 shell 历史。
 
 返回中的 `ip=` 应不同于 VPS 原始公网 IP，`loc=` 应分别为 `JP` 和 `KR`。公共节点随时可能
 失效；超时本身不等于 Gate 泄漏，必须同时确认请求没有返回 VPS 原始公网 IP。
@@ -213,10 +217,11 @@ v0.1 使用 `/var/lib/gate/gate.db` 作为单机 SQLite 基线。最保守的备
 worker 后复制数据库及配置：
 
 ```powershell
-ssh HK-Aliyun "set -eu; stamp=`$(date +%Y%m%d-%H%M%S); install -d -m 0700 /var/backups/gate; systemctl stop gate-api gate-worker; trap 'systemctl start gate-worker gate-api' EXIT; tar -C / -czf /var/backups/gate/gate-`$stamp.tar.gz var/lib/gate/gate.db etc/gate/config.yaml etc/gate/secrets.env; chmod 0600 /var/backups/gate/gate-`$stamp.tar.gz"
+ssh HK-Aliyun "set -eu; stamp=`$(date +%Y%m%d-%H%M%S); install -d -m 0700 /var/backups/gate; systemctl stop gate-api gate-worker; trap 'systemctl start gate-worker gate-api' EXIT; tar -C / -czf /var/backups/gate/gate-`$stamp.tar.gz var/lib/gate/gate.db etc/gate; chmod 0600 /var/backups/gate/gate-`$stamp.tar.gz"
 ```
 
-备份包含会话密钥和密码散列，必须按凭据处理。将备份下载到受控位置：
+备份包含会话密钥、管理密码散列和可恢复的 SOCKS 明文密码，必须按高敏感凭据处理。将备份
+下载到受控位置：
 
 ```powershell
 scp HK-Aliyun:/var/backups/gate/gate-YYYYMMDD-HHMMSS.tar.gz .
@@ -276,6 +281,11 @@ curl --fail http://127.0.0.1:18080/api/v1/health/ready
 
 命令要求输入并确认至少 12 个字符的新密码，不会把明文写入命令历史。
 
+SOCKS 凭据从 WebUI 右上角盾牌用户图标管理。启用、换用户名、换密码和关闭认证都会重载全部
+活动 SOCKS 服务并写入中文事件；密码不会回显。关闭认证会从
+`/etc/gate/socks-auth.json` 清除用户名和密码。直接编辑该文件不会热加载，不属于受支持的轮换
+方式。轮换后以 `curl.exe --proxy-user <用户名>` 验证至少一个活动入口。
+
 ## 11. 发布回滚
 
 先列出当前和可用 release：
@@ -316,8 +326,10 @@ printf 'VPS public IP: %s\n' "$vps_ip"
 Windows 上：
 
 ```powershell
-curl.exe --fail --max-time 15 --proxy socks5h://127.0.0.1:11081 https://api.ipify.org
+curl.exe --fail --max-time 15 --proxy socks5h://127.0.0.1:11081 --proxy-user gate_user https://api.ipify.org
 ```
+
+若当前未启用 SOCKS 认证，去掉 `--proxy-user gate_user`。
 
 期望命令失败。完成后：
 

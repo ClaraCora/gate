@@ -28,4 +28,10 @@ describe("event presentation", () => {
     const current = event({ message: "日本 01 已切换到出口 203.0.113.10" });
     expect(eventDescription(current)).toBe(current.message);
   });
+
+  it("labels SOCKS authentication changes in Chinese", () => {
+    const auth = event({ code: "SOCKS_AUTH_UPDATED", message: "SOCKS 统一认证已启用" });
+    expect(eventTitle(auth.code)).toBe("SOCKS 认证已更新");
+    expect(eventDescription(auth)).toBe(auth.message);
+  });
 });

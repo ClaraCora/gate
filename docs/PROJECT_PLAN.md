@@ -424,7 +424,7 @@ QUEUED -> RUNNING -> SUCCEEDED
 - 自动切换阈值、冷却时间、检查周期和 Top K
 - TCP/UDP 偏好与 TCP 443 回退偏好
 - 锁定线路故障时的处理策略
-- SOCKS 监听地址与认证策略
+- SOCKS 统一认证状态、用户名和密码轮换；密码永不回显
 - 数据保留时间、日志级别和探测流量预算
 
 配置提交前做前后端双重校验。端口冲突、国家代码错误和危险监听地址必须阻止保存。
@@ -563,8 +563,10 @@ regions:
     network_index: 5
 ```
 
-敏感信息放在 `/etc/gate/secrets.env` 或 systemd credentials，包括 WebUI 会话密钥、管理员密码
-哈希和可选 SOCKS 认证。该文件权限为 `0600`，不进入 Git、发布包或日志。
+WebUI 会话密钥和管理员密码哈希放在 `/etc/gate/secrets.env`。可选 SOCKS 统一认证单独保存在
+`/etc/gate/socks-auth.json`；因为 sing-box 和内部出口探测必须使用原始凭据，该密码需要可恢复，
+文件权限固定为 `0640 root:gate-worker`。API 和 WebUI 只返回 `password_set`，不得回显密码；
+凭据不进入 Git、发布包、事件详情或日志。
 
 ## 19. 安全设计
 

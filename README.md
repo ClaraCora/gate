@@ -18,6 +18,7 @@ v0.1 MVP 已实现并部署到真实 VPS，已完成生产链路、断线阻断�
 - 手动测试、验证后切换、重连、锁定、停用、任务取消和启动 reconcile
 - FastAPI、SQLite、持久任务、事件历史、SSE 和数据保留
 - Argon2 管理员密码、签名会话、HttpOnly Cookie、CSRF 与 Origin 校验
+- 所有 SOCKS 入口可启用统一用户名和密码，WebUI 修改后自动重载活动服务
 - React/TypeScript WebUI，覆盖桌面与 360px 以上移动视口
 - systemd 加固、GitHub 预编译发布、VPS 一键安装和失败自动回滚
 
@@ -70,6 +71,16 @@ ssh -N `
 - 其他地区依照上表端口访问
 
 需要远端解析域名的客户端应选择 `socks5h`，避免本机 DNS 绕过代理。
+
+SOCKS 认证默认关闭。登录 WebUI 后点击右上角盾牌用户图标，可为全部入口设置统一用户名和
+密码；启用认证后，测试命令需要增加 `--proxy-user <用户名>`，curl 会交互提示密码：
+
+```powershell
+curl.exe --fail --max-time 20 `
+  --proxy socks5h://127.0.0.1:11081 `
+  --proxy-user gate_user `
+  https://www.cloudflare.com/cdn-cgi/trace
+```
 
 ## 安全说明
 

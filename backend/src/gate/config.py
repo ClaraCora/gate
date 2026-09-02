@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -70,6 +72,28 @@ class SecurityConfig(BaseModel):
         return tuple(dict.fromkeys(normalized))
 
 
+class SocksAuthConfig(BaseModel):
+    enabled: bool = False
+    username: str = ""
+    password: str = ""
+
+    @model_validator(mode="after")
+    def validate_credentials(self) -> SocksAuthConfig:
+        if not self.enabled:
+            if self.username or self.password:
+                raise ValueError("disabled SOCKS authentication must not retain credentials")
+            return self
+        if not re.fullmatch(r"[A-Za-z0-9._-]{3,32}", self.username):
+            raise ValueError(
+                "SOCKS username must be 3-32 ASCII letters, numbers, dots, underscores, or hyphens"
+            )
+        if not 12 <= len(self.password) <= 128:
+            raise ValueError("SOCKS password must be 12-128 characters")
+        if any(ord(character) < 33 or ord(character) > 126 for character in self.password):
+            raise ValueError("SOCKS password must contain visible ASCII characters only")
+        return self
+
+
 class RetentionConfig(BaseModel):
     observations_days: int = Field(default=7, ge=1, le=365)
     probes_days: int = Field(default=7, ge=1, le=365)
@@ -110,6 +134,7 @@ class GateSettings(BaseModel):
     selection: SelectionConfig = SelectionConfig()
     automation: AutomationConfig = AutomationConfig()
     security: SecurityConfig = SecurityConfig()
+    socks_auth: SocksAuthConfig = SocksAuthConfig()
     retention: RetentionConfig = RetentionConfig()
     regions: tuple[RegionConfig, ...]
 
@@ -141,12 +166,32 @@ def default_config_path() -> Path:
     return local if local.exists() else Path("config/gate.example.yaml")
 
 
-def load_settings(path: Path | None = None) -> GateSettings:
+def default_socks_auth_path() -> Path:
+    return Path(os.environ.get("GATE_SOCKS_AUTH_FILE", "/etc/gate/socks-auth.json"))
+
+
+def load_settings(
+    path: Path | None = None,
+    *,
+    socks_auth_path: Path | None = None,
+) -> GateSettings:
     config_path = path or default_config_path()
     with config_path.open("r", encoding="utf-8") as stream:
         raw = yaml.safe_load(stream)
     if not isinstance(raw, dict):
         raise ValueError(f"Gate config must be a mapping: {config_path}")
+    auth_path = socks_auth_path or default_socks_auth_path()
+    raw.pop("socks_auth", None)
+    if auth_path.exists():
+        try:
+            auth_raw = json.loads(auth_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"Invalid SOCKS authentication file: {auth_path}") from exc
+        if not isinstance(auth_raw, dict):
+            raise ValueError(f"SOCKS authentication file must be a mapping: {auth_path}")
+        raw["socks_auth"] = auth_raw
+    else:
+        raw["socks_auth"] = {}
     auth_override = os.environ.get("GATE_AUTH_ENABLED")
     if auth_override is not None:
         normalized = auth_override.strip().lower()

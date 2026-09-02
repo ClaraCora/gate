@@ -29,6 +29,7 @@ import {
   Search,
   ShieldCheck,
   ShieldOff,
+  ShieldUser,
   TriangleAlert,
   Waypoints,
   X,
@@ -51,6 +52,7 @@ import type {
   RegionStatus,
   RuntimeSlot,
   SessionState,
+  SocksAuthState,
 } from "./types";
 
 const REGION_LABELS: Record<string, string> = {
@@ -890,6 +892,146 @@ function ChangePasswordDialog({
   );
 }
 
+export function SocksAuthDialog({
+  open,
+  onClose,
+  onChanged,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onChanged: (state: SocksAuthState) => void;
+}) {
+  const queryClient = useQueryClient();
+  const ref = useRef<HTMLDialogElement>(null);
+  const [enabled, setEnabled] = useState(false);
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmation, setConfirmation] = useState("");
+  const [showPasswords, setShowPasswords] = useState(false);
+  const [validationError, setValidationError] = useState<string | null>(null);
+  const authQuery = useQuery({
+    queryKey: ["socks-auth"],
+    queryFn: gateApi.socksAuth,
+    enabled: open,
+    refetchOnWindowFocus: false,
+  });
+  const mutation = useMutation({
+    mutationFn: () => gateApi.updateSocksAuth({
+      enabled,
+      username: enabled ? username : "",
+      password: enabled && password ? password : null,
+    }),
+    onSuccess: (state) => {
+      queryClient.setQueryData(["socks-auth"], state);
+      setPassword("");
+      setConfirmation("");
+      setValidationError(null);
+      onChanged(state);
+    },
+  });
+
+  useEffect(() => {
+    const dialog = ref.current;
+    if (open && dialog && !dialog.open) dialog.showModal();
+    if (!open && dialog?.open) dialog.close();
+  }, [open]);
+
+  useEffect(() => {
+    if (!open || !authQuery.data) return;
+    setEnabled(authQuery.data.enabled);
+    setUsername(authQuery.data.username);
+    setPassword("");
+    setConfirmation("");
+    setValidationError(null);
+  }, [authQuery.data, open]);
+
+  const close = () => {
+    if (mutation.isPending) return;
+    setPassword("");
+    setConfirmation("");
+    setShowPasswords(false);
+    setValidationError(null);
+    mutation.reset();
+    onClose();
+  };
+
+  const validate = (): boolean => {
+    if (!enabled) return true;
+    if (!/^[A-Za-z0-9._-]{3,32}$/.test(username)) {
+      setValidationError("用户名须为 3-32 位字母、数字、点、下划线或连字符");
+      return false;
+    }
+    if (!password && !authQuery.data?.password_set) {
+      setValidationError("首次启用时必须设置密码");
+      return false;
+    }
+    if (password && (password.length < 12 || password.length > 128)) {
+      setValidationError("密码须为 12-128 个字符");
+      return false;
+    }
+    if (password && !/^[\x21-\x7E]+$/.test(password)) {
+      setValidationError("密码只能使用可见 ASCII 字符，不能包含空格或中文");
+      return false;
+    }
+    if (password !== confirmation) {
+      setValidationError("两次输入的新密码不一致");
+      return false;
+    }
+    return true;
+  };
+
+  return (
+    <dialog className="switch-dialog password-dialog socks-auth-dialog" onCancel={(event) => { event.preventDefault(); close(); }} ref={ref}>
+      <div className="dialog-heading">
+        <div><ShieldUser size={20} /><h2>SOCKS 统一认证</h2></div>
+        <button aria-label="关闭 SOCKS 认证设置" className="icon-button" disabled={mutation.isPending} onClick={close} title="关闭" type="button"><X size={18} /></button>
+      </div>
+      {authQuery.isLoading ? <div className="dialog-loading"><SkeletonRows count={4} /></div> : authQuery.isError ? (
+        <div className="empty-state socks-auth-error"><CircleAlert size={24} /><strong>认证设置加载失败</strong><span>{errorMessage(authQuery.error)}</span><button className="button button--secondary" onClick={() => void authQuery.refetch()} type="button"><RefreshCw size={16} />重新加载</button></div>
+      ) : (
+        <form
+          className="password-form socks-auth-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            mutation.reset();
+            if (!validate()) return;
+            setValidationError(null);
+            mutation.mutate();
+          }}
+        >
+          <label className="auth-toggle" htmlFor="socks-auth-enabled">
+            <span><strong>要求身份验证</strong><small>{enabled ? "所有已启用入口均需凭据" : "当前允许无认证连接"}</small></span>
+            <input checked={enabled} id="socks-auth-enabled" onChange={(event) => { setEnabled(event.target.checked); setValidationError(null); }} type="checkbox" />
+            <i aria-hidden="true" />
+          </label>
+          <label htmlFor="socks-username">统一用户名</label>
+          <input autoComplete="username" disabled={!enabled} id="socks-username" maxLength={32} onChange={(event) => setUsername(event.target.value)} placeholder="例如 gate_user" spellCheck={false} value={username} />
+          <small>3-32 位字母、数字、点、下划线或连字符</small>
+          <label htmlFor="socks-password">{authQuery.data?.password_set ? "新密码" : "密码"}</label>
+          <input aria-describedby="socks-password-hint" autoComplete="new-password" disabled={!enabled} id="socks-password" maxLength={128} onChange={(event) => { const value = event.target.value; setPassword(value); if (!value) setConfirmation(""); }} type={showPasswords ? "text" : "password"} value={password} />
+          <small id="socks-password-hint">{authQuery.data?.password_set ? "留空则保留当前密码；新密码至少 12 个字符" : "至少 12 个字符"}</small>
+          <label htmlFor="socks-password-confirmation">确认新密码</label>
+          <input autoComplete="new-password" disabled={!enabled || !password} id="socks-password-confirmation" maxLength={128} onChange={(event) => setConfirmation(event.target.value)} type={showPasswords ? "text" : "password"} value={confirmation} />
+          <label className="password-visibility" htmlFor="show-socks-passwords">
+            <input checked={showPasswords} disabled={!enabled} id="show-socks-passwords" onChange={(event) => setShowPasswords(event.target.checked)} type="checkbox" />
+            {showPasswords ? <EyeOff aria-hidden="true" size={15} /> : <Eye aria-hidden="true" size={15} />}
+            显示密码
+          </label>
+          {(validationError || mutation.isError) ? <p className="form-error" role="alert"><CircleAlert size={16} />{validationError ?? errorMessage(mutation.error)}</p> : null}
+          <p className="password-session-note password-session-note--warning"><TriangleAlert size={15} />保存时会重载活动 SOCKS 服务，现有代理连接可能中断。</p>
+          <div className="dialog-actions">
+            <button className="button button--secondary" disabled={mutation.isPending} onClick={close} type="button">取消</button>
+            <button className={`button ${enabled ? "button--primary" : "button--danger"}`} disabled={authQuery.isLoading || mutation.isPending} type="submit">
+              {mutation.isPending ? <LoaderCircle className="spin" size={16} /> : <ShieldUser size={16} />}
+              {mutation.isPending ? "正在应用" : enabled ? "保存认证设置" : "关闭认证"}
+            </button>
+          </div>
+        </form>
+      )}
+    </dialog>
+  );
+}
+
 function ConsoleView({
   session,
   onLogout,
@@ -905,6 +1047,7 @@ function ConsoleView({
   const [disableTarget, setDisableTarget] = useState<Region | null>(null);
   const [candidateOpen, setCandidateOpen] = useState(false);
   const [passwordOpen, setPasswordOpen] = useState(false);
+  const [socksAuthOpen, setSocksAuthOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const streamState = useGateStream(session.authenticated);
   const regionsQuery = useQuery({ queryKey: ["regions"], queryFn: gateApi.regions, refetchInterval: 10_000 });
@@ -1016,6 +1159,7 @@ function ConsoleView({
         </nav>
         <div className="command-actions">
           <button className="button button--dark" disabled={refreshMutation.isPending} onClick={() => refreshMutation.mutate()} type="button">{refreshMutation.isPending ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}{refreshMutation.isPending ? "正在发现" : "刷新节点"}</button>
+          <button aria-label="设置 SOCKS 认证" className="icon-button icon-button--dark" onClick={() => setSocksAuthOpen(true)} title="设置 SOCKS 认证" type="button"><ShieldUser size={17} /></button>
           {session.security_enabled ? <button aria-label="修改管理密码" className="icon-button icon-button--dark" onClick={() => setPasswordOpen(true)} title="修改管理密码" type="button"><KeyRound size={17} /></button> : null}
           <button aria-label="退出登录" className="icon-button icon-button--dark" onClick={onLogout} title="退出登录" type="button"><LogOut size={17} /></button>
         </div>
@@ -1058,6 +1202,7 @@ function ConsoleView({
       <CandidateDialog busy={Boolean(activeJob) || switchMutation.isPending || candidateProbeMutation.isPending} candidates={candidates} error={candidatesQuery.error} loading={candidatesQuery.isLoading} onClose={() => setCandidateOpen(false)} onProbe={(candidate) => { if (selectedRegion) candidateProbeMutation.mutate({ regionId: selectedRegion.id, nodeId: candidate.id }); }} onRetry={() => void candidatesQuery.refetch()} onSwitch={setSwitchTarget} region={candidateOpen ? selectedRegion : null} />
       <SwitchDialog busy={switchMutation.isPending} candidate={switchTarget} onCancel={() => setSwitchTarget(null)} onConfirm={() => { if (selectedRegion && switchTarget) switchMutation.mutate({ regionId: selectedRegion.id, nodeId: switchTarget.id }); }} region={selectedRegion} />
       <DisableRegionDialog busy={modeMutation.isPending && modeMutation.variables?.mode === "disabled"} onCancel={() => setDisableTarget(null)} onConfirm={() => { if (disableTarget) modeMutation.mutate({ regionId: disableTarget.id, mode: "disabled" }); }} region={disableTarget} />
+      <SocksAuthDialog onChanged={(state) => { setSocksAuthOpen(false); setNotice(state.enabled ? `SOCKS 认证已启用，统一用户名为 ${state.username}` : "SOCKS 认证已关闭"); void queryClient.invalidateQueries({ queryKey: ["events"] }); }} onClose={() => setSocksAuthOpen(false)} open={socksAuthOpen} />
       <ChangePasswordDialog onChanged={(updatedSession) => { onSessionChange(updatedSession); setPasswordOpen(false); setNotice("管理密码已修改，其他登录会话已失效"); void queryClient.invalidateQueries({ queryKey: ["events"] }); }} onClose={() => setPasswordOpen(false)} open={passwordOpen} />
     </div>
   );

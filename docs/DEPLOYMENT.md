@@ -99,6 +99,22 @@ curl.exe --fail --max-time 20 `
 首次登录后，可点击右上角钥匙图标修改管理密码。修改会写入 Gate 数据库并轮换会话密钥，其他
 浏览器中的旧会话会立即失效。
 
+SOCKS 认证默认关闭。点击右上角盾牌用户图标，可启用所有 SOCKS 入口共用的用户名和密码。
+首次启用必须设置密码；之后密码留空表示保留当前密码。保存会重载活动 sing-box 服务，现有
+代理连接可能中断。启用后用以下命令测试，curl 会交互提示代理密码，密码不会写入命令历史：
+
+```powershell
+curl.exe --fail --max-time 20 `
+  --proxy socks5h://127.0.0.1:11081 `
+  --proxy-user gate_user `
+  https://www.cloudflare.com/cdn-cgi/trace
+```
+
+用户名限制为 3-32 位 ASCII 字母、数字、点、下划线或连字符；密码限制为 12-128 位可见
+ASCII 字符。Gate 不向 API 或 WebUI 回显密码。由于 sing-box 运行和内部探测需要可恢复凭据，
+密码由 root worker 保存到 `/etc/gate/socks-auth.json`，权限为 `0640 root:gate-worker`，不得提交
+到 Git 或发送到日志。
+
 ## 5. 可选：通过 Cloudflare Tunnel 访问 WebUI
 
 Cloudflare Tunnel 只转发 WebUI HTTP 流量。SOCKS5 端口仍应使用 SSH 转发，不能配置为普通
@@ -173,9 +189,9 @@ sh /tmp/gate-install.sh
 安装指定版本时，安装器和目标资产使用同一个 tag：
 
 ```sh
-curl -fL https://github.com/ClaraCora/gate/releases/download/v0.1.2/gate-install.sh \
+curl -fL https://github.com/ClaraCora/gate/releases/download/v0.1.3/gate-install.sh \
   -o /tmp/gate-install.sh
-sh /tmp/gate-install.sh --version v0.1.2
+sh /tmp/gate-install.sh --version v0.1.3
 ```
 
 重复安装当前版本是幂等操作；新版本会原子切换 `/opt/gate/current`，就绪检查失败时自动恢复上一
@@ -193,7 +209,7 @@ ssh Gate-VPS "set -eu; target=/opt/gate/releases/RELEASE_ID; test -d `$target; l
 
 ## 8. 备份与恢复
 
-备份包含数据库、配置、管理员密码散列和会话密钥，应按凭据保管：
+备份包含数据库、配置、管理员密码散列、会话密钥和 SOCKS 明文凭据，应按高敏感凭据保管：
 
 ```powershell
 ssh Gate-VPS "set -eu; stamp=`$(date +%Y%m%d-%H%M%S); install -d -m 0700 /var/backups/gate; systemctl stop gate-api gate-worker; trap 'systemctl start gate-worker gate-api' EXIT; tar -C / -czf /var/backups/gate/gate-`$stamp.tar.gz var/lib/gate etc/gate; chmod 0600 /var/backups/gate/gate-`$stamp.tar.gz"
@@ -276,7 +292,7 @@ sh /tmp/gate-install.sh
 - `gate-install.sh`：VPS 一键安装器。
 
 维护者发布新版本时，应先同步 `pyproject.toml`、`gate.__version__` 和前端版本，再推送同名 tag。
-例如版本为 `0.1.2` 时，tag 必须为 `v0.1.2`；版本不一致会使工作流立即失败。
+例如版本为 `0.1.3` 时，tag 必须为 `v0.1.3`；版本不一致会使工作流立即失败。
 
 `scripts/deploy.ps1` 仍可用于开发或 GitHub Releases 故障时的应急发布，但它需要 Windows 本机
 具备开发环境，并可能在 VPS 从 PyPI 安装依赖，不是常规生产路径。
@@ -286,9 +302,9 @@ sh /tmp/gate-install.sh
 部署或迁移后至少确认：
 
 1. 四个服务为 active，就绪接口返回 `ok`。
-2. WebUI 能登录、修改密码，并能看到出口、任务、事件三个导航入口。
+2. WebUI 能登录、修改管理密码和 SOCKS 认证，并能看到出口、任务、事件三个导航入口。
 3. 点击右侧出口能打开候选弹窗，IP 搜索和各排序方式正常。
-4. 已启用入口的 SOCKS 请求返回目标国家，且不等于 VPS 原始公网 IP。
+4. 已启用入口的 SOCKS 请求携带当前凭据后返回目标国家，且不等于 VPS 原始公网 IP。
 5. 停止活动 OpenVPN 后，SOCKS 请求失败而不是回落到 VPS 公网出口。
 6. WebUI 和 SOCKS 仅监听回环地址，Cloudflare Access 或 SSH 负责访问控制。
 

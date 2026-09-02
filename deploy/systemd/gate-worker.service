@@ -9,6 +9,7 @@ User=root
 Group=gate-worker
 WorkingDirectory=/var/lib/gate
 Environment=GATE_CONFIG=/etc/gate/config.yaml
+Environment=GATE_SOCKS_AUTH_FILE=/etc/gate/socks-auth.json
 Environment=GATE_WORKER_USER=gate
 Environment=GATE_WORKER_GROUP=gate-worker
 Environment=GATE_WORKER_SOCKET=/run/gate/worker.sock

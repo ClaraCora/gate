@@ -6,6 +6,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast
 
+from gate.config import SocksAuthConfig
 from gate.database import Database, NodeRecord, RegionRecord, RegionSlotRecord, utc_now
 from gate.discovery import DiscoveryService
 from gate.domain import RegionMode, RegionStatus
@@ -65,6 +66,7 @@ class SwitchCoordinator:
         worker: WorkerGateway | None = None,
         haproxy: HaProxyGateway | None = None,
         probe: ProbeCallable = probe_socks_exit,
+        socks_auth: SocksAuthConfig | None = None,
         drain_seconds: float = 180.0,
     ) -> None:
         self.database = database
@@ -72,10 +74,34 @@ class SwitchCoordinator:
         self.worker = worker or WorkerClient()
         self.haproxy = haproxy or HaProxyRuntime()
         self.probe = probe
+        self._socks_auth = socks_auth or SocksAuthConfig()
         self.drain_seconds = drain_seconds
         self._region_locks: dict[str, asyncio.Lock] = {}
         self._group_locks: dict[str, asyncio.Lock] = {}
         self._cleanup_tasks: set[asyncio.Task[None]] = set()
+
+    def set_socks_auth(self, auth: SocksAuthConfig) -> None:
+        self._socks_auth = auth
+
+    async def _probe_exit(
+        self,
+        host: str,
+        port: int,
+        *,
+        expected_countries: set[str] | frozenset[str],
+    ) -> EgressProbe:
+        credentials: dict[str, str] = {}
+        if self._socks_auth.enabled:
+            credentials = {
+                "username": self._socks_auth.username,
+                "password": self._socks_auth.password,
+            }
+        return await self.probe(
+            host,
+            port,
+            expected_countries=expected_countries,
+            **credentials,
+        )
 
     async def _destroy_slot(self, region_id: str, slot: Literal["a", "b"]) -> None:
         await self.haproxy.disable(region_id, slot)
@@ -145,7 +171,7 @@ class SwitchCoordinator:
                     await self._destroy_slot(record.region_id, slot)
                     continue
                 try:
-                    probe = await self.probe(
+                    probe = await self._probe_exit(
                         record.backend_address,
                         1080,
                         expected_countries=set(region.countries),
@@ -306,7 +332,7 @@ class SwitchCoordinator:
             if not isinstance(namespace_ip, str):
                 raise SwitchError("gate-worker did not return the slot address")
             await report(0.55, "正在测试 HTTPS、DNS、出口 IP 和国家")
-            probe = await self.probe(
+            probe = await self._probe_exit(
                 namespace_ip,
                 1080,
                 expected_countries=set(region.countries),
@@ -419,7 +445,7 @@ class SwitchCoordinator:
             if not isinstance(namespace_ip, str):
                 raise SwitchError("gate-worker did not return the slot address")
             await report(0.45, "正在通过隔离 SOCKS 入口测试候选节点")
-            direct_probe = await self.probe(
+            direct_probe = await self._probe_exit(
                 namespace_ip,
                 1080,
                 expected_countries=set(region.countries),
@@ -440,7 +466,7 @@ class SwitchCoordinator:
             if active is not None:
                 await self.haproxy.drain(region_id, active.slot)
             await report(0.75, "正在验证固定 SOCKS 端口")
-            stable_probe = await self.probe(
+            stable_probe = await self._probe_exit(
                 "127.0.0.1",
                 region.socks_port,
                 expected_countries=set(region.countries),

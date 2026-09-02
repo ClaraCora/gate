@@ -25,6 +25,18 @@ class ChangePasswordRequest(BaseModel):
     new_password: str = Field(min_length=1, max_length=1024)
 
 
+class SocksAuthUpdateRequest(BaseModel):
+    enabled: bool
+    username: str = Field(default="", max_length=32)
+    password: str | None = Field(default=None, max_length=128)
+
+
+class SocksAuthResponse(BaseModel):
+    enabled: bool
+    username: str
+    password_set: bool
+
+
 class SessionResponse(BaseModel):
     authenticated: bool
     security_enabled: bool = True

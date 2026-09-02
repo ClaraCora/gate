@@ -6,15 +6,17 @@ import ipaddress
 import json
 import os
 import shutil
+import tempfile
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
 
 from gate.commands import CommandRunner
-from gate.config import GateSettings, RegionConfig
+from gate.config import GateSettings, RegionConfig, SocksAuthConfig
 from gate.domain import Transport
 from gate.errors import GateError
 from gate.profiles import validate_sanitized_profile
-from gate.worker_protocol import ProvisionSlotRequest
+from gate.worker_protocol import ProvisionSlotRequest, UpdateSocksAuthRequest
 
 
 class NetworkOperationError(GateError):
@@ -103,6 +105,8 @@ class LinuxNetworkManager:
         *,
         state_root: Path = Path("/var/lib/gate/slots"),
         netns_config_root: Path = Path("/etc/netns"),
+        socks_auth_path: Path = Path("/etc/gate/socks-auth.json"),
+        socks_auth_gid: int | None = None,
         tunnel_timeout_seconds: float = 30.0,
         socks_timeout_seconds: float = 5.0,
     ) -> None:
@@ -111,6 +115,8 @@ class LinuxNetworkManager:
         self.executables = executables
         self.state_root = state_root
         self.netns_config_root = netns_config_root
+        self.socks_auth_path = socks_auth_path
+        self.socks_auth_gid = socks_auth_gid
         self.tunnel_timeout_seconds = tunnel_timeout_seconds
         self.socks_timeout_seconds = socks_timeout_seconds
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
@@ -163,6 +169,30 @@ class LinuxNetworkManager:
                 offset += os.write(descriptor, content[offset:])
         finally:
             os.close(descriptor)
+
+    @staticmethod
+    def _secure_atomic_write(path: Path, text: str, mode: int, *, gid: int | None = None) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
+        if path.is_symlink():
+            raise NetworkOperationError(f"refusing to replace a symlink: {path}")
+        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        temporary = Path(temporary_name)
+        try:
+            os.fchmod(descriptor, mode)
+            if gid is not None:
+                os.fchown(descriptor, 0, gid)
+            content = text.encode("utf-8")
+            offset = 0
+            while offset < len(content):
+                offset += os.write(descriptor, content[offset:])
+            os.fsync(descriptor)
+            os.close(descriptor)
+            descriptor = -1
+            os.replace(temporary, path)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            temporary.unlink(missing_ok=True)
 
     async def _install_namespace_firewall(
         self,
@@ -417,27 +447,36 @@ class LinuxNetworkManager:
             "tun0",
         )
 
-    async def _start_socks(self, spec: SlotSpec) -> None:
-        directory = self._slot_directory(spec)
-        config_path = directory / "sing-box.json"
-        config = {
+    def _socks_config(self, spec: SlotSpec) -> dict[str, object]:
+        inbound: dict[str, object] = {
+            "type": "socks",
+            "tag": "socks-in",
+            "listen": spec.namespace_ip,
+            "listen_port": 1080,
+        }
+        auth = self.settings.socks_auth
+        if auth.enabled:
+            inbound["users"] = [{"username": auth.username, "password": auth.password}]
+        return {
             "log": {"level": "warn", "timestamp": True},
             "dns": {
                 "servers": [{"type": "udp", "tag": "resolver", "server": "1.1.1.1"}],
                 "strategy": "ipv4_only",
             },
-            "inbounds": [
-                {
-                    "type": "socks",
-                    "tag": "socks-in",
-                    "listen": spec.namespace_ip,
-                    "listen_port": 1080,
-                }
-            ],
+            "inbounds": [inbound],
             "outbounds": [{"type": "direct", "tag": "direct"}],
             "route": {"auto_detect_interface": True, "final": "direct"},
         }
-        self._secure_write(config_path, json.dumps(config, indent=2) + "\n", 0o600)
+
+    def _write_socks_config(self, spec: SlotSpec) -> None:
+        config_path = self._slot_directory(spec) / "sing-box.json"
+        self._secure_write(
+            config_path, json.dumps(self._socks_config(spec), indent=2) + "\n", 0o600
+        )
+
+    async def _start_socks(self, spec: SlotSpec) -> None:
+        config_path = self._slot_directory(spec) / "sing-box.json"
+        self._write_socks_config(spec)
         await self.runner.run(
             [
                 self.executables.systemd_run,
@@ -544,6 +583,83 @@ class LinuxNetworkManager:
         async with self._lock(spec):
             await self._destroy_unlocked(spec)
         return spec
+
+    def _write_socks_auth(self, auth: SocksAuthConfig) -> None:
+        self._secure_atomic_write(
+            self.socks_auth_path,
+            json.dumps(auth.model_dump(), indent=2) + "\n",
+            0o640,
+            gid=self.socks_auth_gid,
+        )
+
+    async def update_socks_auth(self, request: UpdateSocksAuthRequest) -> SocksAuthConfig:
+        updated = SocksAuthConfig(
+            enabled=request.enabled,
+            username=request.username,
+            password=request.password,
+        )
+        specs = [slot_spec(region, slot) for region in self.settings.regions for slot in ("a", "b")]
+        async with AsyncExitStack() as locks:
+            for spec in specs:
+                await locks.enter_async_context(self._lock(spec))
+
+            active_specs: list[SlotSpec] = []
+            for spec in specs:
+                if not await self.namespace_exists(spec):
+                    continue
+                state = await self.runner.run(
+                    [self.executables.systemctl, "is-active", spec.socks_unit],
+                    check=False,
+                )
+                if state.stdout.strip() == "active":
+                    active_specs.append(spec)
+
+            old_auth = self.settings.socks_auth
+            auth_existed = self.socks_auth_path.exists()
+            old_auth_text = (
+                self.socks_auth_path.read_text(encoding="utf-8") if auth_existed else None
+            )
+            config_snapshots: dict[Path, str | None] = {}
+            try:
+                self._write_socks_auth(updated)
+                self.settings.socks_auth = updated
+                for spec in active_specs:
+                    config_path = self._slot_directory(spec) / "sing-box.json"
+                    config_snapshots[config_path] = (
+                        config_path.read_text(encoding="utf-8") if config_path.exists() else None
+                    )
+                    self._write_socks_config(spec)
+                for spec in active_specs:
+                    await self.runner.run([self.executables.systemctl, "restart", spec.socks_unit])
+                    await self._wait_for_socks(spec)
+            except Exception as exc:
+                self.settings.socks_auth = old_auth
+                try:
+                    if old_auth_text is None:
+                        self.socks_auth_path.unlink(missing_ok=True)
+                    else:
+                        self._secure_atomic_write(
+                            self.socks_auth_path,
+                            old_auth_text,
+                            0o640,
+                            gid=self.socks_auth_gid,
+                        )
+                    for path, content in config_snapshots.items():
+                        if content is None:
+                            path.unlink(missing_ok=True)
+                        else:
+                            self._secure_write(path, content, 0o600)
+                    for spec in active_specs:
+                        await self.runner.run(
+                            [self.executables.systemctl, "restart", spec.socks_unit],
+                            check=False,
+                        )
+                except Exception as rollback_exc:
+                    raise NetworkOperationError(
+                        f"SOCKS authentication update and rollback failed: {rollback_exc}"
+                    ) from exc
+                raise NetworkOperationError(f"SOCKS authentication update failed: {exc}") from exc
+        return updated
 
     async def inspect(self) -> list[dict[str, object]]:
         result: list[dict[str, object]] = []

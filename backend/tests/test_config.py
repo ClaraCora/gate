@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
-from gate.config import GateSettings, load_settings
+from gate.config import GateSettings, SocksAuthConfig, load_settings
 from pydantic import ValidationError
 
 
@@ -31,3 +34,41 @@ def test_rejects_duplicate_socks_ports() -> None:
 
     with pytest.raises(ValidationError, match="SOCKS ports must be unique"):
         GateSettings.model_validate(raw)
+
+
+def test_loads_socks_auth_from_separate_file_without_using_yaml(tmp_path: Path) -> None:
+    auth_path = tmp_path / "socks-auth.json"
+    auth_path.write_text(
+        json.dumps(
+            {
+                "enabled": True,
+                "username": "gate_user",
+                "password": "strong!proxy#password",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    settings = load_settings(socks_auth_path=auth_path)
+
+    assert settings.socks_auth.enabled is True
+    assert settings.socks_auth.username == "gate_user"
+    assert settings.socks_auth.password == "strong!proxy#password"
+
+
+@pytest.mark.parametrize(
+    ("username", "password", "message"),
+    [
+        ("ab", "strong!proxy#password", "username"),
+        ("gate_user", "too-short", "12-128"),
+        ("gate_user", "密码密码密码密码密码密码", "visible ASCII"),
+    ],
+)
+def test_rejects_invalid_socks_credentials(username: str, password: str, message: str) -> None:
+    with pytest.raises(ValidationError, match=message):
+        SocksAuthConfig(enabled=True, username=username, password=password)
+
+
+def test_disabled_socks_auth_cannot_retain_credentials() -> None:
+    with pytest.raises(ValidationError, match="must not retain"):
+        SocksAuthConfig(enabled=False, username="gate_user", password="strong!proxy#password")

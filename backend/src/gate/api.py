@@ -12,9 +12,10 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import ValidationError
 
 from gate import __version__
-from gate.config import GateSettings, load_settings
+from gate.config import GateSettings, SocksAuthConfig, load_settings
 from gate.controller import AutomationController
 from gate.coordinator import SwitchCoordinator
 from gate.database import Database, JobStatus
@@ -35,15 +36,22 @@ from gate.schemas import (
     RegionResponse,
     SessionResponse,
     SlotRuntimeResponse,
+    SocksAuthResponse,
+    SocksAuthUpdateRequest,
 )
 from gate.scoring import calculate_quality
 from gate.security import SESSION_COOKIE, SessionError, SessionManager
 from gate.worker_client import WorkerClient
-from gate.worker_protocol import HealthRequest, InspectRequest
+from gate.worker_protocol import HealthRequest, InspectRequest, UpdateSocksAuthRequest
+from gate.worker_protocol import Request as WorkerRequest
 
 
 class WorkerHealthGateway(Protocol):
     async def request(self, request: HealthRequest) -> dict[str, object]: ...
+
+
+class WorkerGateway(Protocol):
+    async def request(self, request: WorkerRequest) -> dict[str, object]: ...
 
 
 def create_app(
@@ -52,6 +60,7 @@ def create_app(
     database: Database | None = None,
     discovery: DiscoveryService | None = None,
     coordinator: SwitchCoordinator | None = None,
+    worker: WorkerGateway | None = None,
     worker_health: WorkerHealthGateway | None = None,
     password_hash: str | None = None,
     session_secret: str | None = None,
@@ -66,12 +75,15 @@ def create_app(
         feed_url=app_settings.discovery.url,
         fallback_urls=app_settings.discovery.fallback_urls,
     )
-    app_worker = WorkerClient()
+    app_worker: WorkerGateway = worker or WorkerClient()
     app_coordinator = coordinator or SwitchCoordinator(
         app_database,
         app_discovery,
         worker=app_worker,
+        socks_auth=app_settings.socks_auth,
     )
+    if isinstance(app_coordinator, SwitchCoordinator):
+        app_coordinator.set_socks_auth(app_settings.socks_auth)
     app_worker_health = worker_health or WorkerClient(timeout_seconds=1.0)
     app_automation = AutomationController(
         app_settings,
@@ -86,6 +98,7 @@ def create_app(
     )
     background_tasks: set[asyncio.Task[None]] = set()
     job_tasks: dict[str, asyncio.Task[None]] = {}
+    socks_auth_update_lock = asyncio.Lock()
 
     def schedule_job(job_id: str, operation: Coroutine[object, object, None]) -> None:
         task: asyncio.Task[None] = asyncio.create_task(operation)
@@ -272,6 +285,12 @@ def create_app(
                 "127.0.0.1",
                 region.socks_port,
                 expected_countries=set(region.countries),
+                username=(
+                    app_settings.socks_auth.username if app_settings.socks_auth.enabled else None
+                ),
+                password=(
+                    app_settings.socks_auth.password if app_settings.socks_auth.enabled else None
+                ),
             )
         except GateError as exc:
             await app_database.update_job(
@@ -419,6 +438,83 @@ def create_app(
     @app.delete("/api/v1/session", status_code=status.HTTP_204_NO_CONTENT)
     async def logout(response: Response) -> None:
         response.delete_cookie(SESSION_COOKIE, path="/")
+
+    @app.get("/api/v1/socks-auth", response_model=SocksAuthResponse)
+    async def get_socks_auth() -> SocksAuthResponse:
+        auth = app_settings.socks_auth
+        return SocksAuthResponse(
+            enabled=auth.enabled,
+            username=auth.username,
+            password_set=bool(auth.password),
+        )
+
+    @app.put("/api/v1/socks-auth", response_model=SocksAuthResponse)
+    async def update_socks_auth(payload: SocksAuthUpdateRequest) -> SocksAuthResponse:
+        async with socks_auth_update_lock:
+            current = app_settings.socks_auth
+            if payload.enabled:
+                password = payload.password or current.password
+                if not password:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                        detail="首次启用 SOCKS 认证时必须设置密码",
+                    )
+                try:
+                    updated = SocksAuthConfig(
+                        enabled=True,
+                        username=payload.username,
+                        password=password,
+                    )
+                except ValidationError as exc:
+                    message = str(exc)
+                    if "username" in message:
+                        detail = "用户名须为 3-32 位字母、数字、点、下划线或连字符"
+                    elif "visible ASCII" in message:
+                        detail = "密码只能包含可见 ASCII 字符, 不能包含空格或中文"
+                    else:
+                        detail = "密码须为 12-128 个字符"
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                        detail=detail,
+                    ) from exc
+            else:
+                updated = SocksAuthConfig()
+
+            try:
+                await app_worker.request(
+                    UpdateSocksAuthRequest(
+                        action="update_socks_auth",
+                        enabled=updated.enabled,
+                        username=updated.username,
+                        password=updated.password,
+                    )
+                )
+            except GateError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail={
+                        "code": exc.code,
+                        "message": "SOCKS 认证更新失败, 原配置已保留",
+                    },
+                ) from exc
+
+            app_settings.socks_auth = updated
+            if isinstance(app_coordinator, SwitchCoordinator):
+                app_coordinator.set_socks_auth(updated)
+            action = "启用" if updated.enabled else "关闭"
+            await app_database.add_event(
+                code="SOCKS_AUTH_UPDATED",
+                message=f"SOCKS 统一认证已{action}",
+                details={
+                    "enabled": updated.enabled,
+                    "username": updated.username,
+                },
+            )
+            return SocksAuthResponse(
+                enabled=updated.enabled,
+                username=updated.username,
+                password_set=bool(updated.password),
+            )
 
     @app.get("/api/v1/health/live", response_model=HealthResponse)
     async def live() -> HealthResponse:

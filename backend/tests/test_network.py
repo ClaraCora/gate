@@ -1,22 +1,24 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
 from gate.commands import CommandResult, CommandRunner
-from gate.config import load_settings
+from gate.config import SocksAuthConfig, load_settings
 from gate.errors import ProfileRejectedError
-from gate.network import ExecutablePaths, LinuxNetworkManager, slot_spec
+from gate.network import ExecutablePaths, LinuxNetworkManager, NetworkOperationError, slot_spec
 from gate.profiles import sanitize_openvpn_profile
-from gate.worker_protocol import ProvisionSlotRequest
+from gate.worker_protocol import ProvisionSlotRequest, UpdateSocksAuthRequest
 
 
 class FakeRunner(CommandRunner):
     def __init__(self) -> None:
         self.commands: list[tuple[str, ...]] = []
         self.namespaces: set[str] = set()
+        self.active_units: set[str] = set()
 
     async def run(
         self,
@@ -35,13 +37,42 @@ class FakeRunner(CommandRunner):
             self.namespaces.add(command[3])
         elif command[:3] == ("ip", "netns", "delete"):
             self.namespaces.discard(command[3])
+        if command and command[0] == "systemd-run":
+            self.active_units.update(
+                argument.removeprefix("--unit=")
+                for argument in command
+                if argument.startswith("--unit=")
+            )
+        if command[:2] == ("systemctl", "stop"):
+            self.active_units.discard(command[2])
         if command[-4:] == ("ip", "link", "show", "tun0"):
             return CommandResult(command, 0, "tun0: UP", "")
         if "ss" in command:
             return CommandResult(command, 0, "LISTEN 0 4096 10.253.0.2:1080 0.0.0.0:*", "")
-        if "is-active" in command:
-            return CommandResult(command, 3, "inactive\n", "")
+        if command[:2] == ("systemctl", "is-active"):
+            active = command[2] in self.active_units
+            return CommandResult(
+                command, 0 if active else 3, "active\n" if active else "inactive\n", ""
+            )
         return CommandResult(command, 0, "", "")
+
+
+class FailingRestartRunner(FakeRunner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_next_restart = False
+
+    async def run(
+        self,
+        args: Sequence[str],
+        *,
+        check: bool = True,
+        input_text: str | None = None,
+    ) -> CommandResult:
+        if tuple(args[:2]) == ("systemctl", "restart") and self.fail_next_restart:
+            self.fail_next_restart = False
+            raise RuntimeError("simulated restart failure")
+        return await super().run(args, check=check, input_text=input_text)
 
 
 def _executables() -> ExecutablePaths:
@@ -153,3 +184,95 @@ async def test_manager_rejects_noncanonical_profile_before_network_changes(
         await manager.provision(request)
 
     assert runner.commands == []
+
+
+@pytest.mark.asyncio
+async def test_socks_auth_rewrites_and_restarts_active_sing_box(
+    tmp_path: Path, encoded_profile: str
+) -> None:
+    settings = load_settings().model_copy(
+        update={
+            "socks_auth": SocksAuthConfig(
+                enabled=True,
+                username="gate_user",
+                password="strong!proxy#password",
+            )
+        }
+    )
+    runner = FakeRunner()
+    auth_path = tmp_path / "etc" / "socks-auth.json"
+    manager = LinuxNetworkManager(
+        settings,
+        runner,
+        _executables(),
+        state_root=tmp_path / "state",
+        netns_config_root=tmp_path / "netns",
+        socks_auth_path=auth_path,
+    )
+    spec = await manager.provision(_request(encoded_profile))
+    config_path = tmp_path / "state" / spec.namespace / "sing-box.json"
+
+    configured = json.loads(config_path.read_text(encoding="utf-8"))
+    assert configured["inbounds"][0]["users"] == [
+        {"username": "gate_user", "password": "strong!proxy#password"}
+    ]
+
+    updated = await manager.update_socks_auth(
+        UpdateSocksAuthRequest(
+            action="update_socks_auth",
+            enabled=False,
+            username="",
+            password="",
+        )
+    )
+
+    assert updated.enabled is False
+    assert "users" not in json.loads(config_path.read_text(encoding="utf-8"))["inbounds"][0]
+    assert json.loads(auth_path.read_text(encoding="utf-8")) == {
+        "enabled": False,
+        "username": "",
+        "password": "",
+    }
+    assert ("systemctl", "restart", spec.socks_unit) in runner.commands
+
+
+@pytest.mark.asyncio
+async def test_socks_auth_update_restores_file_config_and_runtime_on_failure(
+    tmp_path: Path, encoded_profile: str
+) -> None:
+    old_auth = SocksAuthConfig(
+        enabled=True,
+        username="old_user",
+        password="old!proxy#password",
+    )
+    settings = load_settings().model_copy(update={"socks_auth": old_auth})
+    runner = FailingRestartRunner()
+    auth_path = tmp_path / "etc" / "socks-auth.json"
+    manager = LinuxNetworkManager(
+        settings,
+        runner,
+        _executables(),
+        state_root=tmp_path / "state",
+        netns_config_root=tmp_path / "netns",
+        socks_auth_path=auth_path,
+    )
+    spec = await manager.provision(_request(encoded_profile))
+    config_path = tmp_path / "state" / spec.namespace / "sing-box.json"
+    old_config = config_path.read_text(encoding="utf-8")
+    runner.fail_next_restart = True
+
+    with pytest.raises(NetworkOperationError, match="update failed"):
+        await manager.update_socks_auth(
+            UpdateSocksAuthRequest(
+                action="update_socks_auth",
+                enabled=True,
+                username="new_user",
+                password="new!proxy#password",
+            )
+        )
+
+    assert settings.socks_auth == old_auth
+    assert config_path.read_text(encoding="utf-8") == old_config
+    assert not auth_path.exists()
+    restarts = [command for command in runner.commands if command[:2] == ("systemctl", "restart")]
+    assert restarts[-1] == ("systemctl", "restart", spec.socks_unit)

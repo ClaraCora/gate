@@ -6,6 +6,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
 
+from gate.config import SocksAuthConfig
 from gate.domain import Transport
 
 
@@ -53,8 +54,28 @@ class DestroySlotRequest(WorkerRequest):
     slot: Literal["a", "b"]
 
 
+class UpdateSocksAuthRequest(WorkerRequest):
+    action: Literal["update_socks_auth"]
+    enabled: bool
+    username: str = Field(default="", max_length=32)
+    password: str = Field(default="", max_length=128)
+
+    @model_validator(mode="after")
+    def validate_credentials(self) -> UpdateSocksAuthRequest:
+        SocksAuthConfig(
+            enabled=self.enabled,
+            username=self.username,
+            password=self.password,
+        )
+        return self
+
+
 Request = Annotated[
-    HealthRequest | InspectRequest | ProvisionSlotRequest | DestroySlotRequest,
+    HealthRequest
+    | InspectRequest
+    | ProvisionSlotRequest
+    | DestroySlotRequest
+    | UpdateSocksAuthRequest,
     Field(discriminator="action"),
 ]
 REQUEST_ADAPTER: TypeAdapter[Request] = TypeAdapter(Request)

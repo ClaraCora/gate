@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -20,7 +21,8 @@ from gate.database import Database
 from gate.discovery import DiscoveryService
 from gate.domain import FeedParseResult, VpnGateNode
 from gate.errors import GateError
-from gate.worker_protocol import HealthRequest
+from gate.worker_protocol import HealthRequest, UpdateSocksAuthRequest
+from gate.worker_protocol import Request as WorkerRequest
 
 
 class HealthyWorker:
@@ -32,6 +34,21 @@ class HealthyWorker:
 class UnavailableWorker:
     async def request(self, request: HealthRequest) -> dict[str, object]:
         raise GateError("worker unavailable")
+
+
+class RecordingWorker:
+    def __init__(self) -> None:
+        self.requests: list[WorkerRequest] = []
+
+    async def request(self, request: WorkerRequest) -> dict[str, object]:
+        self.requests.append(request)
+        if isinstance(request, UpdateSocksAuthRequest):
+            return {
+                "enabled": request.enabled,
+                "username": request.username,
+                "password_set": bool(request.password),
+            }
+        return {}
 
 
 @dataclass
@@ -92,6 +109,71 @@ def _node(encoded_profile: str) -> VpnGateNode:
         message="",
         openvpn_config_base64=encoded_profile,
     )
+
+
+@pytest.mark.asyncio
+async def test_socks_auth_api_hides_password_preserves_it_and_clears_on_disable(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path / "socks-auth.db")
+    worker = RecordingWorker()
+    app = create_app(
+        settings,
+        worker=worker,
+        worker_health=HealthyWorker(),
+        reconcile_on_startup=False,
+        automation_on_startup=False,
+    )
+
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            initial = await client.get("/api/v1/socks-auth")
+            missing_password = await client.put(
+                "/api/v1/socks-auth",
+                json={"enabled": True, "username": "gate_user", "password": ""},
+                headers=MUTATION_HEADERS,
+            )
+            enabled = await client.put(
+                "/api/v1/socks-auth",
+                json={
+                    "enabled": True,
+                    "username": "gate_user",
+                    "password": "p@ss:/?#[]!word",
+                },
+                headers=MUTATION_HEADERS,
+            )
+            visible = await client.get("/api/v1/socks-auth")
+            renamed = await client.put(
+                "/api/v1/socks-auth",
+                json={"enabled": True, "username": "proxy_user"},
+                headers=MUTATION_HEADERS,
+            )
+            disabled = await client.put(
+                "/api/v1/socks-auth",
+                json={"enabled": False, "username": "ignored", "password": "ignored"},
+                headers=MUTATION_HEADERS,
+            )
+            events = await client.get("/api/v1/events")
+
+    assert initial.json() == {"enabled": False, "username": "", "password_set": False}
+    assert missing_password.status_code == 422
+    assert enabled.json() == {
+        "enabled": True,
+        "username": "gate_user",
+        "password_set": True,
+    }
+    assert visible.json() == enabled.json()
+    assert "p@ss:/?#[]!word" not in visible.text
+    assert renamed.json()["username"] == "proxy_user"
+    updates = [
+        request for request in worker.requests if isinstance(request, UpdateSocksAuthRequest)
+    ]
+    assert updates[1].password == "p@ss:/?#[]!word"
+    assert disabled.json() == {"enabled": False, "username": "", "password_set": False}
+    assert settings.socks_auth.enabled is False
+    assert events.json()[0]["code"] == "SOCKS_AUTH_UPDATED"
+    assert "p@ss:/?#[]!word" not in json.dumps(events.json())
 
 
 @pytest.mark.asyncio
