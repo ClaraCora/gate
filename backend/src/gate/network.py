@@ -15,6 +15,7 @@ from gate.commands import CommandRunner
 from gate.config import GateSettings, RegionConfig, SocksAuthConfig
 from gate.domain import Transport
 from gate.errors import GateError
+from gate.haproxy import HaProxyRuntime, ServerState
 from gate.profiles import validate_sanitized_profile
 from gate.worker_protocol import ProvisionSlotRequest, UpdateSocksAuthRequest
 
@@ -110,6 +111,7 @@ class LinuxNetworkManager:
         socks_auth_path: Path = Path("/etc/gate/socks-auth.json"),
         socks_auth_gid: int | None = None,
         haproxy_config_path: Path = Path("/etc/haproxy/haproxy.cfg"),
+        haproxy_runtime: HaProxyRuntime | None = None,
         tunnel_timeout_seconds: float = 30.0,
         socks_timeout_seconds: float = 5.0,
     ) -> None:
@@ -121,6 +123,7 @@ class LinuxNetworkManager:
         self.socks_auth_path = socks_auth_path
         self.socks_auth_gid = socks_auth_gid
         self.haproxy_config_path = haproxy_config_path
+        self.haproxy_runtime = haproxy_runtime or HaProxyRuntime()
         self.tunnel_timeout_seconds = tunnel_timeout_seconds
         self.socks_timeout_seconds = socks_timeout_seconds
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
@@ -667,12 +670,18 @@ class LinuxNetworkManager:
                 if listener_changed and self.haproxy_config_path.exists()
                 else None
             )
+            haproxy_states: dict[tuple[str, str], ServerState] = {}
             config_snapshots: dict[Path, str | None] = {}
             try:
+                if listener_changed:
+                    haproxy_states = await self.haproxy_runtime.snapshot(
+                        region.id for region in self.settings.regions
+                    )
                 self._write_socks_auth(updated)
                 self.settings.socks_auth = updated
                 if listener_changed and updated.listen == "127.0.0.1":
                     await self._install_haproxy_config()
+                    await self.haproxy_runtime.restore(haproxy_states)
                 if credentials_changed:
                     for spec in active_specs:
                         config_path = self._slot_directory(spec) / "sing-box.json"
@@ -689,6 +698,7 @@ class LinuxNetworkManager:
                         await self._wait_for_socks(spec)
                 if listener_changed and updated.listen == "0.0.0.0":
                     await self._install_haproxy_config()
+                    await self.haproxy_runtime.restore(haproxy_states)
             except Exception as exc:
                 self.settings.socks_auth = old_auth
                 try:
@@ -721,6 +731,7 @@ class LinuxNetworkManager:
                                 ],
                                 check=False,
                             )
+                            await self.haproxy_runtime.restore(haproxy_states)
 
                     async def restore_socks_runtime() -> None:
                         if not credentials_changed:

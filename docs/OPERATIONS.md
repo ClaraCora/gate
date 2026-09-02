@@ -53,7 +53,7 @@ sh /tmp/gate-install.sh
 后续更新重新下载并执行同一命令。安装指定版本时使用：
 
 ```sh
-sh /tmp/gate-install.sh --version v0.1.6
+sh /tmp/gate-install.sh --version v0.1.7
 ```
 
 首次安装会在终端输出一次 `Gate WebUI initial admin password`。立即放入密码管理器；脚本只把

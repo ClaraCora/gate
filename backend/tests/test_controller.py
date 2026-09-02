@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from gate.config import DatabaseConfig, SelectionConfig, load_settings
+from gate.config import DatabaseConfig, SelectionConfig, SocksAuthConfig, load_settings
 from gate.controller import AutomationController
 from gate.database import Database
 from gate.discovery import DiscoveryService
@@ -166,6 +166,11 @@ async def test_locked_region_stays_unavailable_after_health_threshold(
                 switch_cooldown_minutes=30,
                 active_failure_threshold=1,
             ),
+            "socks_auth": SocksAuthConfig(
+                enabled=True,
+                username="gate_user",
+                password="strong!proxy#password",
+            ),
         }
     )
     database = Database(settings.database.url)
@@ -195,9 +200,11 @@ async def test_locked_region_stays_unavailable_after_health_threshold(
     discovery = DiscoveryService(database, feed_url="unused")
     discovery.profiles[profile.fingerprint] = profile
     coordinator = FakeCoordinator()
+    received_credentials: dict[str, object] = {}
 
     async def failed_probe(*args: object, **kwargs: object) -> EgressProbe:
-        del args, kwargs
+        del args
+        received_credentials.update(kwargs)
         raise ProbeError("locked route failed")
 
     controller = AutomationController(
@@ -213,6 +220,8 @@ async def test_locked_region_stays_unavailable_after_health_threshold(
     region = await database.get_region("jp")
     assert region is not None and region.status == RegionStatus.UNAVAILABLE
     assert coordinator.switches == []
+    assert received_credentials["username"] == "gate_user"
+    assert received_credentials["password"] == "strong!proxy#password"
     events = await database.list_events()
     assert any(event.code == "LOCKED_REGION_UNAVAILABLE" for event in events)
     await database.close()

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+import csv
+import io
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from pathlib import Path
+from typing import Literal
 
 from gate.errors import GateError
 
@@ -12,6 +15,7 @@ class HaProxyError(GateError):
 
 
 CommandSender = Callable[[str], Awaitable[str]]
+ServerState = Literal["ready", "drain", "maint"]
 
 
 class HaProxyRuntime:
@@ -67,3 +71,38 @@ class HaProxyRuntime:
 
     async def disable(self, region_id: str, slot: str) -> None:
         await self._send(f"set server {self._server(region_id, slot)} state maint")
+
+    async def snapshot(self, region_ids: Iterable[str]) -> dict[tuple[str, str], ServerState]:
+        expected = {
+            (f"gate_{region_id}_slots", f"{region_id}-{slot}"): (region_id, slot)
+            for region_id in region_ids
+            for slot in ("a", "b")
+        }
+        response = await self._send("show stat")
+        states: dict[tuple[str, str], ServerState] = {}
+        for row in csv.DictReader(io.StringIO(response)):
+            key = (row.get("# pxname", ""), row.get("svname", ""))
+            server = expected.get(key)
+            if server is None or row.get("type") != "2":
+                continue
+            status = row.get("status", "").upper()
+            if status.startswith("UP"):
+                states[server] = "ready"
+            elif status.startswith(("DRAIN", "NOLB")):
+                states[server] = "drain"
+            else:
+                states[server] = "maint"
+        missing = set(expected.values()) - states.keys()
+        if missing:
+            names = ", ".join(f"{region_id}/{slot}" for region_id, slot in sorted(missing))
+            raise HaProxyError(f"HAProxy runtime snapshot is incomplete: {names}")
+        return states
+
+    async def restore(self, states: Mapping[tuple[str, str], ServerState]) -> None:
+        for (region_id, slot), state in states.items():
+            if state == "ready":
+                await self.ready(region_id, slot)
+            elif state == "drain":
+                await self.drain(region_id, slot)
+            else:
+                await self.disable(region_id, slot)

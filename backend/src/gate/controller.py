@@ -167,11 +167,18 @@ class AutomationController:
                 continue
             active = await self.database.get_active_slot(region.id)
             started_at = utc_now()
+            credentials: dict[str, str] = {}
+            if self.settings.socks_auth.enabled:
+                credentials = {
+                    "username": self.settings.socks_auth.username,
+                    "password": self.settings.socks_auth.password,
+                }
             try:
                 probe = await self.probe(
                     "127.0.0.1",
                     region.socks_port,
                     expected_countries=set(region.countries),
+                    **credentials,
                 )
             except GateError as exc:
                 if active is not None and active.node_id is not None:

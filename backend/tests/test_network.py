@@ -9,6 +9,7 @@ import pytest
 from gate.commands import CommandResult, CommandRunner
 from gate.config import SocksAuthConfig, load_settings
 from gate.errors import ProfileRejectedError
+from gate.haproxy import HaProxyRuntime
 from gate.network import ExecutablePaths, LinuxNetworkManager, NetworkOperationError, slot_spec
 from gate.profiles import sanitize_openvpn_profile
 from gate.worker_protocol import ProvisionSlotRequest, UpdateSocksAuthRequest
@@ -288,18 +289,31 @@ async def test_socks_auth_update_restores_file_config_and_runtime_on_failure(
 
 @pytest.mark.asyncio
 async def test_public_listener_rewrites_validates_and_reloads_haproxy(tmp_path: Path) -> None:
-    settings = load_settings().model_copy(
+    base_settings = load_settings()
+    japan = next(region for region in base_settings.regions if region.id == "jp")
+    settings = base_settings.model_copy(
         update={
+            "regions": (japan,),
             "socks_auth": SocksAuthConfig(
                 enabled=True,
                 username="gate_user",
                 password="strong!proxy#password",
-            )
+            ),
         }
     )
     runner = FakeRunner()
     auth_path = tmp_path / "etc" / "gate" / "socks-auth.json"
     haproxy_path = tmp_path / "etc" / "haproxy" / "haproxy.cfg"
+    runtime_commands: list[str] = []
+
+    async def runtime_sender(command: str) -> str:
+        runtime_commands.append(command)
+        if command == "show stat":
+            return (
+                "# pxname,svname,status,type\ngate_jp_slots,jp-a,MAINT,2\ngate_jp_slots,jp-b,UP,2\n"
+            )
+        return ""
+
     manager = LinuxNetworkManager(
         settings,
         runner,
@@ -308,6 +322,7 @@ async def test_public_listener_rewrites_validates_and_reloads_haproxy(tmp_path: 
         netns_config_root=tmp_path / "netns",
         socks_auth_path=auth_path,
         haproxy_config_path=haproxy_path,
+        haproxy_runtime=HaProxyRuntime(sender=runtime_sender),
     )
 
     updated = await manager.update_socks_auth(
@@ -325,3 +340,9 @@ async def test_public_listener_rewrites_validates_and_reloads_haproxy(tmp_path: 
     assert json.loads(auth_path.read_text(encoding="utf-8"))["listen"] == "0.0.0.0"
     assert any(command[:3] == ("haproxy", "-c", "-f") for command in runner.commands)
     assert ("systemctl", "reload-or-restart", "haproxy.service") in runner.commands
+    assert runtime_commands == [
+        "show stat",
+        "set server gate_jp_slots/jp-a state maint",
+        "set server gate_jp_slots/jp-b state ready",
+        "set server gate_jp_slots/jp-b health up",
+    ]
