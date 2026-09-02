@@ -53,7 +53,7 @@ sh /tmp/gate-install.sh
 后续更新重新下载并执行同一命令。安装指定版本时使用：
 
 ```sh
-sh /tmp/gate-install.sh --version v0.1.3
+sh /tmp/gate-install.sh --version v0.1.4
 ```
 
 首次安装会在终端输出一次 `Gate WebUI initial admin password`。立即放入密码管理器；脚本只把
@@ -279,7 +279,7 @@ systemctl start gate-api
 curl --fail http://127.0.0.1:18080/api/v1/health/ready
 ```
 
-命令要求输入并确认至少 12 个字符的新密码，不会把明文写入命令历史。
+命令要求输入并确认至少 8 个字符的新密码，不会把明文写入命令历史。
 
 SOCKS 凭据从 WebUI 右上角盾牌用户图标管理。启用、换用户名、换密码和关闭认证都会重载全部
 活动 SOCKS 服务并写入中文事件；密码不会回显。关闭认证会从

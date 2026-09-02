@@ -139,7 +139,7 @@ async def test_password_change_persists_and_invalidates_existing_sessions(
                 "/api/v1/session/password",
                 json={
                     "current_password": "correct horse battery staple",
-                    "new_password": "too short",
+                    "new_password": "1234567",
                 },
                 headers=headers,
             )
@@ -147,7 +147,7 @@ async def test_password_change_persists_and_invalidates_existing_sessions(
                 "/api/v1/session/password",
                 json={
                     "current_password": "correct horse battery staple",
-                    "new_password": "new secure password 123",
+                    "new_password": "12345678",
                 },
                 headers=headers,
             )
@@ -163,6 +163,7 @@ async def test_password_change_persists_and_invalidates_existing_sessions(
     assert wrong_current.status_code == 400
     assert wrong_current.json()["detail"] == "当前密码不正确"
     assert short_password.status_code == 422
+    assert short_password.json()["detail"] == "新密码至少需要 8 个字符"
     assert changed.status_code == 200
     assert changed.json()["csrf_token"] != csrf_token
     assert current_session.json()["authenticated"] is True
@@ -187,7 +188,7 @@ async def test_password_change_persists_and_invalidates_existing_sessions(
             )
             new_login = await client.post(
                 "/api/v1/session/login",
-                json={"password": "new secure password 123"},
+                json={"password": "12345678"},
                 headers={"Origin": "http://test", "X-Gate-Request": "webui"},
             )
 

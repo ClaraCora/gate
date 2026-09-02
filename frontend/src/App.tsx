@@ -850,8 +850,8 @@ function ChangePasswordDialog({
         onSubmit={(event) => {
           event.preventDefault();
           mutation.reset();
-          if (newPassword.length < 12) {
-            setValidationError("新密码至少需要 12 个字符");
+          if (newPassword.length < 8) {
+            setValidationError("新密码至少需要 8 个字符");
             return;
           }
           if (currentPassword === newPassword) {
@@ -870,7 +870,7 @@ function ChangePasswordDialog({
         <input autoComplete="current-password" autoFocus id="current-password" maxLength={1024} onChange={(event) => setCurrentPassword(event.target.value)} type={showPasswords ? "text" : "password"} value={currentPassword} />
         <label htmlFor="new-password">新密码</label>
         <input aria-describedby="new-password-hint" autoComplete="new-password" id="new-password" maxLength={1024} onChange={(event) => setNewPassword(event.target.value)} type={showPasswords ? "text" : "password"} value={newPassword} />
-        <small id="new-password-hint">至少 12 个字符</small>
+        <small id="new-password-hint">至少 8 个字符</small>
         <label htmlFor="confirm-password">确认新密码</label>
         <input autoComplete="new-password" id="confirm-password" maxLength={1024} onChange={(event) => setConfirmation(event.target.value)} type={showPasswords ? "text" : "password"} value={confirmation} />
         <label className="password-visibility" htmlFor="show-passwords">
@@ -965,8 +965,8 @@ export function SocksAuthDialog({
       setValidationError("首次启用时必须设置密码");
       return false;
     }
-    if (password && (password.length < 12 || password.length > 128)) {
-      setValidationError("密码须为 12-128 个字符");
+    if (password && (password.length < 8 || password.length > 128)) {
+      setValidationError("密码须为 8-128 个字符");
       return false;
     }
     if (password && !/^[\x21-\x7E]+$/.test(password)) {
@@ -1009,7 +1009,7 @@ export function SocksAuthDialog({
           <small>3-32 位字母、数字、点、下划线或连字符</small>
           <label htmlFor="socks-password">{authQuery.data?.password_set ? "新密码" : "密码"}</label>
           <input aria-describedby="socks-password-hint" autoComplete="new-password" disabled={!enabled} id="socks-password" maxLength={128} onChange={(event) => { const value = event.target.value; setPassword(value); if (!value) setConfirmation(""); }} type={showPasswords ? "text" : "password"} value={password} />
-          <small id="socks-password-hint">{authQuery.data?.password_set ? "留空则保留当前密码；新密码至少 12 个字符" : "至少 12 个字符"}</small>
+          <small id="socks-password-hint">{authQuery.data?.password_set ? "留空则保留当前密码；新密码至少 8 个字符" : "至少 8 个字符"}</small>
           <label htmlFor="socks-password-confirmation">确认新密码</label>
           <input autoComplete="new-password" disabled={!enabled || !password} id="socks-password-confirmation" maxLength={128} onChange={(event) => setConfirmation(event.target.value)} type={showPasswords ? "text" : "password"} value={confirmation} />
           <label className="password-visibility" htmlFor="show-socks-passwords">

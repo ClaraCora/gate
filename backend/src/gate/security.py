@@ -121,8 +121,8 @@ class SessionManager:
 
 def hash_password_main() -> None:
     password = sys.stdin.readline().rstrip("\r\n")
-    if len(password) < 12:
-        raise SystemExit("Password must contain at least 12 characters")
+    if len(password) < 8:
+        raise SystemExit("Password must contain at least 8 characters")
     print(PasswordHasher().hash(password))
 
 
@@ -134,8 +134,8 @@ def reset_password_main() -> None:
             raise SystemExit("Passwords do not match")
     else:
         password = sys.stdin.readline().rstrip("\r\n")
-    if len(password) < 12:
-        raise SystemExit("Password must contain at least 12 characters")
+    if len(password) < 8:
+        raise SystemExit("Password must contain at least 8 characters")
 
     async def persist() -> None:
         from gate.config import load_settings

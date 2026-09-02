@@ -87,8 +87,8 @@ class SocksAuthConfig(BaseModel):
             raise ValueError(
                 "SOCKS username must be 3-32 ASCII letters, numbers, dots, underscores, or hyphens"
             )
-        if not 12 <= len(self.password) <= 128:
-            raise ValueError("SOCKS password must be 12-128 characters")
+        if not 8 <= len(self.password) <= 128:
+            raise ValueError("SOCKS password must be 8-128 characters")
         if any(ord(character) < 33 or ord(character) > 126 for character in self.password):
             raise ValueError("SOCKS password must contain visible ASCII characters only")
         return self

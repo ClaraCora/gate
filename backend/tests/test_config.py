@@ -60,13 +60,19 @@ def test_loads_socks_auth_from_separate_file_without_using_yaml(tmp_path: Path) 
     ("username", "password", "message"),
     [
         ("ab", "strong!proxy#password", "username"),
-        ("gate_user", "too-short", "12-128"),
+        ("gate_user", "1234567", "8-128"),
         ("gate_user", "密码密码密码密码密码密码", "visible ASCII"),
     ],
 )
 def test_rejects_invalid_socks_credentials(username: str, password: str, message: str) -> None:
     with pytest.raises(ValidationError, match=message):
         SocksAuthConfig(enabled=True, username=username, password=password)
+
+
+def test_accepts_eight_character_socks_password() -> None:
+    auth = SocksAuthConfig(enabled=True, username="gate_user", password="12345678")
+
+    assert auth.password == "12345678"
 
 
 def test_disabled_socks_auth_cannot_retain_credentials() -> None:

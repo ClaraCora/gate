@@ -414,8 +414,8 @@ def create_app(
         if not app_sessions.verify_password(payload.current_password):
             await asyncio.sleep(0.25)
             raise HTTPException(status_code=400, detail="当前密码不正确")
-        if len(payload.new_password) < 12:
-            raise HTTPException(status_code=422, detail="新密码至少需要 12 个字符")
+        if len(payload.new_password) < 8:
+            raise HTTPException(status_code=422, detail="新密码至少需要 8 个字符")
         if secrets.compare_digest(payload.current_password, payload.new_password):
             raise HTTPException(status_code=422, detail="新密码不能与当前密码相同")
 
@@ -472,7 +472,7 @@ def create_app(
                     elif "visible ASCII" in message:
                         detail = "密码只能包含可见 ASCII 字符, 不能包含空格或中文"
                     else:
-                        detail = "密码须为 12-128 个字符"
+                        detail = "密码须为 8-128 个字符"
                     raise HTTPException(
                         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                         detail=detail,

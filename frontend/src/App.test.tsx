@@ -52,14 +52,20 @@ describe("SocksAuthDialog", () => {
     expect(update).not.toHaveBeenCalled();
 
     fireEvent.change(screen.getByLabelText("统一用户名"), { target: { value: "gate_user" } });
-    fireEvent.change(screen.getByLabelText("密码"), { target: { value: "p@ss:/?#[]!word" } });
-    fireEvent.change(screen.getByLabelText("确认新密码"), { target: { value: "p@ss:/?#[]!word" } });
+    fireEvent.change(screen.getByLabelText("密码"), { target: { value: "1234567" } });
+    fireEvent.change(screen.getByLabelText("确认新密码"), { target: { value: "1234567" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存认证设置" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("密码须为 8-128 个字符");
+    expect(update).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByLabelText("密码"), { target: { value: "p@ssw0rd" } });
+    fireEvent.change(screen.getByLabelText("确认新密码"), { target: { value: "p@ssw0rd" } });
     fireEvent.click(screen.getByRole("button", { name: "保存认证设置" }));
 
     await waitFor(() => expect(update).toHaveBeenCalledWith({
       enabled: true,
       username: "gate_user",
-      password: "p@ss:/?#[]!word",
+      password: "p@ssw0rd",
     }));
     await waitFor(() => expect(changed).toHaveBeenCalledWith({
       enabled: true,
