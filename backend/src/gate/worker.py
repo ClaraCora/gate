@@ -67,6 +67,7 @@ class WorkerDispatcher:
                     "enabled": auth.enabled,
                     "username": auth.username,
                     "password_set": bool(auth.password),
+                    "listen": auth.listen,
                 },
             )
         raise AssertionError("unhandled worker request")

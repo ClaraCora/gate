@@ -41,6 +41,21 @@ class AutomationController:
         self.coordinator = coordinator or SwitchCoordinator(database, discovery)
         self.probe = probe
         self.failure_counts: dict[str, int] = {}
+        self._enabled = settings.automation.enabled
+        self._enabled_event = asyncio.Event()
+        if self._enabled:
+            self._enabled_event.set()
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    def set_enabled(self, enabled: bool) -> None:
+        self._enabled = enabled
+        if enabled:
+            self._enabled_event.set()
+        else:
+            self._enabled_event.clear()
 
     async def _run_automatic_job(
         self,
@@ -330,10 +345,13 @@ class AutomationController:
         interval_seconds: float,
         *,
         immediate: bool,
+        requires_enabled: bool = False,
     ) -> None:
         if not immediate:
             await asyncio.sleep(interval_seconds)
         while True:
+            if requires_enabled:
+                await self._enabled_event.wait()
             try:
                 await operation()
             except asyncio.CancelledError:
@@ -351,13 +369,19 @@ class AutomationController:
         optimization_interval = self.settings.automation.optimization_interval_minutes * 60
         async with asyncio.TaskGroup() as tasks:
             tasks.create_task(
-                self._repeat(self.run_discovery_cycle, discovery_interval, immediate=True)
+                self._repeat(
+                    self.run_discovery_cycle,
+                    discovery_interval,
+                    immediate=True,
+                    requires_enabled=True,
+                )
             )
             tasks.create_task(
                 self._repeat(
                     self.run_health_cycle,
                     self.settings.automation.health_interval_seconds,
                     immediate=False,
+                    requires_enabled=True,
                 )
             )
             tasks.create_task(
@@ -365,6 +389,7 @@ class AutomationController:
                     self.run_optimization_cycle,
                     optimization_interval,
                     immediate=False,
+                    requires_enabled=True,
                 )
             )
             tasks.create_task(self._repeat(self.run_maintenance_cycle, 86_400, immediate=False))

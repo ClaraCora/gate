@@ -29,12 +29,22 @@ class SocksAuthUpdateRequest(BaseModel):
     enabled: bool
     username: str = Field(default="", max_length=32)
     password: str | None = Field(default=None, max_length=128)
+    listen: Literal["127.0.0.1", "0.0.0.0"] | None = None
 
 
 class SocksAuthResponse(BaseModel):
     enabled: bool
     username: str
     password_set: bool
+    listen: Literal["127.0.0.1", "0.0.0.0"]
+
+
+class AutomationUpdateRequest(BaseModel):
+    enabled: bool
+
+
+class AutomationResponse(BaseModel):
+    enabled: bool
 
 
 class SessionResponse(BaseModel):

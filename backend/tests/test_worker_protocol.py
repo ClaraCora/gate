@@ -77,6 +77,7 @@ def test_socks_auth_request_validates_complete_effective_credentials() -> None:
 
     assert isinstance(request, UpdateSocksAuthRequest)
     assert request.password == "strong!proxy#password"
+    assert request.listen == "127.0.0.1"
 
     with pytest.raises(ValidationError, match="must not retain"):
         REQUEST_ADAPTER.validate_python(
@@ -85,5 +86,14 @@ def test_socks_auth_request_validates_complete_effective_credentials() -> None:
                 "enabled": False,
                 "username": "gate_user",
                 "password": "strong!proxy#password",
+            }
+        )
+
+    with pytest.raises(ValidationError, match="public SOCKS listening requires authentication"):
+        REQUEST_ADAPTER.validate_python(
+            {
+                "action": "update_socks_auth",
+                "enabled": False,
+                "listen": "0.0.0.0",
             }
         )

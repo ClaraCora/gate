@@ -24,6 +24,8 @@ from gate.domain import RegionMode
 from gate.errors import GateError
 from gate.probes import probe_socks_exit
 from gate.schemas import (
+    AutomationResponse,
+    AutomationUpdateRequest,
     CandidateResponse,
     ChangePasswordRequest,
     DiscoveryResponse,
@@ -99,6 +101,8 @@ def create_app(
     background_tasks: set[asyncio.Task[None]] = set()
     job_tasks: dict[str, asyncio.Task[None]] = {}
     socks_auth_update_lock = asyncio.Lock()
+    runtime_slots_lock = asyncio.Lock()
+    runtime_slots_cache: tuple[float, list[SlotRuntimeResponse]] | None = None
 
     def schedule_job(job_id: str, operation: Coroutine[object, object, None]) -> None:
         task: asyncio.Task[None] = asyncio.create_task(operation)
@@ -117,11 +121,17 @@ def create_app(
         stored_credentials = await app_database.get_security_credentials()
         if stored_credentials is not None:
             app_sessions.replace_credentials(*stored_credentials)
+        stored_automation_enabled = await app_database.get_automation_enabled()
+        app_automation.set_enabled(
+            app_settings.automation.enabled
+            if stored_automation_enabled is None
+            else stored_automation_enabled
+        )
         await app_database.fail_interrupted_jobs()
         await app_database.cleanup_retention(**app_settings.retention.model_dump())
         if reconcile_on_startup:
             await app_coordinator.reconcile()
-        if automation_on_startup and app_settings.automation.enabled:
+        if automation_on_startup:
             task = asyncio.create_task(app_automation.run_forever())
             background_tasks.add(task)
             task.add_done_callback(background_tasks.discard)
@@ -446,12 +456,24 @@ def create_app(
             enabled=auth.enabled,
             username=auth.username,
             password_set=bool(auth.password),
+            listen=auth.listen,
         )
+
+    @app.get("/api/v1/automation", response_model=AutomationResponse)
+    async def get_automation() -> AutomationResponse:
+        return AutomationResponse(enabled=app_automation.enabled)
+
+    @app.put("/api/v1/automation", response_model=AutomationResponse)
+    async def update_automation(payload: AutomationUpdateRequest) -> AutomationResponse:
+        await app_database.set_automation_enabled(payload.enabled)
+        app_automation.set_enabled(payload.enabled)
+        return AutomationResponse(enabled=app_automation.enabled)
 
     @app.put("/api/v1/socks-auth", response_model=SocksAuthResponse)
     async def update_socks_auth(payload: SocksAuthUpdateRequest) -> SocksAuthResponse:
         async with socks_auth_update_lock:
             current = app_settings.socks_auth
+            listen = payload.listen or current.listen
             if payload.enabled:
                 password = payload.password or current.password
                 if not password:
@@ -464,6 +486,7 @@ def create_app(
                         enabled=True,
                         username=payload.username,
                         password=password,
+                        listen=listen,
                     )
                 except ValidationError as exc:
                     message = str(exc)
@@ -478,7 +501,12 @@ def create_app(
                         detail=detail,
                     ) from exc
             else:
-                updated = SocksAuthConfig()
+                if listen == "0.0.0.0":
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                        detail="公网监听必须启用 SOCKS 用户名和密码认证",
+                    )
+                updated = SocksAuthConfig(listen=listen)
 
             try:
                 await app_worker.request(
@@ -487,6 +515,7 @@ def create_app(
                         enabled=updated.enabled,
                         username=updated.username,
                         password=updated.password,
+                        listen=updated.listen,
                     )
                 )
             except GateError as exc:
@@ -494,26 +523,29 @@ def create_app(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                     detail={
                         "code": exc.code,
-                        "message": "SOCKS 认证更新失败, 原配置已保留",
+                        "message": "SOCKS 接入设置更新失败, 原配置已保留",
                     },
                 ) from exc
 
             app_settings.socks_auth = updated
             if isinstance(app_coordinator, SwitchCoordinator):
                 app_coordinator.set_socks_auth(updated)
-            action = "启用" if updated.enabled else "关闭"
+            auth_state = "已启用认证" if updated.enabled else "未启用认证"
+            listen_label = "全部网卡" if updated.listen == "0.0.0.0" else "仅本机"
             await app_database.add_event(
                 code="SOCKS_AUTH_UPDATED",
-                message=f"SOCKS 统一认证已{action}",
+                message=f"SOCKS 接入设置已更新: 监听{listen_label}, {auth_state}",
                 details={
                     "enabled": updated.enabled,
                     "username": updated.username,
+                    "listen": updated.listen,
                 },
             )
             return SocksAuthResponse(
                 enabled=updated.enabled,
                 username=updated.username,
                 password_set=bool(updated.password),
+                listen=updated.listen,
             )
 
     @app.get("/api/v1/health/live", response_model=HealthResponse)
@@ -623,17 +655,27 @@ def create_app(
 
     @app.get("/api/v1/runtime/slots", response_model=list[SlotRuntimeResponse])
     async def runtime_slots() -> list[SlotRuntimeResponse]:
-        try:
-            data = await app_worker.request(InspectRequest(action="inspect"))
-        except GateError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail={"code": exc.code, "message": "gate-worker is unavailable"},
-            ) from exc
-        slots = data.get("slots")
-        if not isinstance(slots, list):
-            raise HTTPException(status_code=502, detail="Worker returned invalid runtime state")
-        return [SlotRuntimeResponse.model_validate(item) for item in slots]
+        nonlocal runtime_slots_cache
+        now = asyncio.get_running_loop().time()
+        if runtime_slots_cache is not None and now - runtime_slots_cache[0] < 2.0:
+            return runtime_slots_cache[1]
+        async with runtime_slots_lock:
+            now = asyncio.get_running_loop().time()
+            if runtime_slots_cache is not None and now - runtime_slots_cache[0] < 2.0:
+                return runtime_slots_cache[1]
+            try:
+                data = await app_worker.request(InspectRequest(action="inspect"))
+            except GateError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail={"code": exc.code, "message": "gate-worker is unavailable"},
+                ) from exc
+            slots = data.get("slots")
+            if not isinstance(slots, list):
+                raise HTTPException(status_code=502, detail="Worker returned invalid runtime state")
+            parsed = [SlotRuntimeResponse.model_validate(item) for item in slots]
+            runtime_slots_cache = (asyncio.get_running_loop().time(), parsed)
+            return parsed
 
     @app.post(
         "/api/v1/discovery/refresh",
@@ -802,11 +844,14 @@ def create_app(
 
     @app.get("/api/v1/events/stream")
     async def stream_events(request: Request) -> StreamingResponse:
-        raw_cursor = request.headers.get("last-event-id", "0")
-        try:
-            initial_cursor = max(0, int(raw_cursor))
-        except ValueError:
-            initial_cursor = 0
+        raw_cursor = request.headers.get("last-event-id")
+        if raw_cursor is None:
+            initial_cursor = await app_database.latest_event_id()
+        else:
+            try:
+                initial_cursor = max(0, int(raw_cursor))
+            except ValueError:
+                initial_cursor = await app_database.latest_event_id()
 
         async def generate() -> AsyncIterator[str]:
             cursor = initial_cursor

@@ -28,7 +28,7 @@ def render_haproxy_config(settings: GateSettings) -> str:
         lines.extend(
             [
                 f"frontend gate_{region.id}",
-                f"    bind 127.0.0.1:{region.socks_port}",
+                f"    bind {settings.socks_auth.listen}:{region.socks_port}",
                 f"    default_backend gate_{region.id}_slots",
                 "",
                 f"backend gate_{region.id}_slots",

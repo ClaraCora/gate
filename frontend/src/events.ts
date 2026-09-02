@@ -2,6 +2,7 @@ import type { GateEvent } from "./types";
 
 const EVENT_TITLES: Record<string, string> = {
   ACTIVE_HEALTH_CHECK_FAILED: "活动出口检查失败",
+  AUTOMATION_ENABLED_CHANGED: "自动检查设置已更新",
   AUTOMATION_DISCOVERY_FAILED: "自动刷新失败",
   AUTOMATION_INTERNAL_ERROR: "自动维护异常",
   AUTO_CANDIDATE_FAILED: "自动候选切换失败",
@@ -20,13 +21,14 @@ const EVENT_TITLES: Record<string, string> = {
   RECONCILE_REJECTED_ACTIVE_SLOT: "启动校验未通过",
   RECONCILE_VERIFIED_ACTIVE_SLOT: "启动校验通过",
   SECURITY_PASSWORD_CHANGED: "管理密码已修改",
-  SOCKS_AUTH_UPDATED: "SOCKS 认证已更新",
+  SOCKS_AUTH_UPDATED: "SOCKS 接入设置已更新",
   SWITCH_COMPLETED: "线路切换完成",
   SWITCH_ROLLED_BACK: "线路切换已回退",
 };
 
 const EVENT_FALLBACKS: Record<string, string> = {
   ACTIVE_HEALTH_CHECK_FAILED: "活动出口未通过健康检查, 系统将按失败次数决定是否重选线路。",
+  AUTOMATION_ENABLED_CHANGED: "自动检查开关已更新。",
   AUTOMATION_DISCOVERY_FAILED: "系统未能刷新节点列表, 请检查上游连接后重试。",
   AUTOMATION_INTERNAL_ERROR: "自动维护周期发生异常, 请查看服务日志。",
   AUTO_CANDIDATE_FAILED: "候选节点未能完成自动切换, 当前活动线路保持不变。",
@@ -45,7 +47,7 @@ const EVENT_FALLBACKS: Record<string, string> = {
   RECONCILE_REJECTED_ACTIVE_SLOT: "活动隧道未通过启动校验, 已停止转发。",
   RECONCILE_VERIFIED_ACTIVE_SLOT: "活动隧道已通过启动校验并恢复转发。",
   SECURITY_PASSWORD_CHANGED: "管理员密码已更新，其他浏览器中的登录会话已失效。",
-  SOCKS_AUTH_UPDATED: "所有 SOCKS 入口已应用新的统一认证设置。",
+  SOCKS_AUTH_UPDATED: "所有 SOCKS 入口已应用新的监听和统一认证设置。",
   SWITCH_COMPLETED: "新出口已通过验证, 固定端口已完成切换。",
   SWITCH_ROLLED_BACK: "新出口未通过验证, 固定端口已恢复原线路。",
 };

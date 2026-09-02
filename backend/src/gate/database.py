@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     DateTime,
     Float,
     ForeignKey,
@@ -191,6 +192,14 @@ class SecurityStateRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class AutomationStateRecord(Base):
+    __tablename__ = "automation_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class Database:
     def __init__(self, url: str) -> None:
         self.engine: AsyncEngine = create_async_engine(url)
@@ -313,6 +322,30 @@ class Database:
                     message="管理员密码已修改。其他登录会话已失效",
                 )
             )
+
+    async def get_automation_enabled(self) -> bool | None:
+        async with self.sessions() as session:
+            record = await session.get(AutomationStateRecord, 1)
+            return record.enabled if record is not None else None
+
+    async def set_automation_enabled(self, enabled: bool) -> None:
+        async with self.sessions() as session, session.begin():
+            record = await session.get(AutomationStateRecord, 1)
+            changed = record is None or record.enabled != enabled
+            if record is None:
+                session.add(AutomationStateRecord(id=1, enabled=enabled))
+            else:
+                record.enabled = enabled
+                record.updated_at = utc_now()
+            if changed:
+                session.add(
+                    EventRecord(
+                        code="AUTOMATION_ENABLED_CHANGED",
+                        level="info",
+                        message=f"自动检查已{'开启' if enabled else '关闭'}",
+                        details={"enabled": enabled},
+                    )
+                )
 
     async def ingest_nodes(
         self, items: Iterable[tuple[VpnGateNode, SanitizedProfile]], observed_at: datetime
@@ -796,6 +829,11 @@ class Database:
         async with self.sessions() as session:
             statement = select(EventRecord).order_by(EventRecord.created_at.desc()).limit(limit)
             return list(await session.scalars(statement))
+
+    async def latest_event_id(self) -> int:
+        async with self.sessions() as session:
+            event_id = await session.scalar(select(func.max(EventRecord.id)))
+            return int(event_id or 0)
 
     async def list_events_after(self, event_id: int, limit: int = 100) -> list[EventRecord]:
         async with self.sessions() as session:

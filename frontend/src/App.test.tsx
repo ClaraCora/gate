@@ -3,7 +3,8 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { PropsWithChildren } from "react";
 
 import { gateApi } from "./api";
-import { SocksAuthDialog } from "./App";
+import { AutomationControl, RegionTable, SocksAuthDialog, useGateStream } from "./App";
+import type { Region } from "./types";
 
 function wrapper({ children }: PropsWithChildren) {
   const client = new QueryClient({
@@ -27,7 +28,122 @@ beforeAll(() => {
   });
 });
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+class FakeEventSource {
+  static instance: FakeEventSource;
+
+  onopen: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  listener: (() => void) | null = null;
+  closed = false;
+
+  constructor(public readonly url: string) {
+    FakeEventSource.instance = this;
+  }
+
+  addEventListener(type: string, listener: () => void) {
+    if (type === "gate-event") this.listener = listener;
+  }
+
+  close() {
+    this.closed = true;
+  }
+
+  emit() {
+    this.listener?.();
+  }
+}
+
+function StreamHarness() {
+  const state = useGateStream(true);
+  return <span>{state}</span>;
+}
+
+describe("automatic checks", () => {
+  it("renders a reversible automation switch", () => {
+    const changed = vi.fn();
+    render(<AutomationControl disabled={false} enabled onChange={changed} pending={false} />);
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "自动检查" }));
+
+    expect(changed).toHaveBeenCalledWith(false);
+    expect(screen.getByText("运行中")).toBeInTheDocument();
+  });
+
+  it("coalesces an event burst into one query refresh batch", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const invalidate = vi.spyOn(client, "invalidateQueries").mockResolvedValue();
+    const view = render(
+      <QueryClientProvider client={client}><StreamHarness /></QueryClientProvider>,
+    );
+
+    for (let index = 0; index < 20; index += 1) FakeEventSource.instance.emit();
+
+    await waitFor(() => expect(invalidate).toHaveBeenCalledTimes(6), { timeout: 1_000 });
+    view.unmount();
+    expect(FakeEventSource.instance.closed).toBe(true);
+  });
+});
+
+describe("region table", () => {
+  it("shows the current exit IP for every SOCKS port", () => {
+    const regions: Region[] = [
+      {
+        id: "jp",
+        group_id: "jp",
+        name: "日本 01",
+        countries: ["JP"],
+        socks_port: 11081,
+        network_index: 1,
+        enabled: true,
+        mode: "locked",
+        status: "healthy",
+        active_node_id: 1,
+        active_egress_ip: "203.0.113.10",
+        candidate_count: 5,
+        updated_at: "2026-09-02T00:00:00Z",
+      },
+      {
+        id: "jp-02",
+        group_id: "jp",
+        name: "日本 02",
+        countries: ["JP"],
+        socks_port: 11101,
+        network_index: 2,
+        enabled: false,
+        mode: "disabled",
+        status: "disabled",
+        active_node_id: null,
+        active_egress_ip: null,
+        candidate_count: 5,
+        updated_at: "2026-09-02T00:00:00Z",
+      },
+    ];
+
+    render(
+      <RegionTable
+        jobs={[]}
+        listen="0.0.0.0"
+        modePendingRegionId={null}
+        onSelect={() => undefined}
+        onToggle={() => undefined}
+        regions={regions}
+        runtimeUnavailable={false}
+        selectedId="jp"
+        slots={[]}
+      />,
+    );
+
+    expect(screen.getByText("0.0.0.0:11081")).toBeInTheDocument();
+    expect(screen.getByText("203.0.113.10")).toBeInTheDocument();
+    expect(screen.getByText("未分配")).toBeInTheDocument();
+  });
+});
 
 describe("SocksAuthDialog", () => {
   it("validates new credentials and submits the unified SOCKS settings", async () => {
@@ -35,11 +151,13 @@ describe("SocksAuthDialog", () => {
       enabled: false,
       username: "",
       password_set: false,
+      listen: "127.0.0.1",
     });
     const update = vi.spyOn(gateApi, "updateSocksAuth").mockResolvedValue({
       enabled: true,
       username: "gate_user",
       password_set: true,
+      listen: "127.0.0.1",
     });
     const changed = vi.fn();
     render(<SocksAuthDialog onChanged={changed} onClose={() => undefined} open />, { wrapper });
@@ -66,11 +184,13 @@ describe("SocksAuthDialog", () => {
       enabled: true,
       username: "gate_user",
       password: "p@ssw0rd",
+      listen: "127.0.0.1",
     }));
     await waitFor(() => expect(changed).toHaveBeenCalledWith({
       enabled: true,
       username: "gate_user",
       password_set: true,
+      listen: "127.0.0.1",
     }));
   });
 
@@ -79,11 +199,13 @@ describe("SocksAuthDialog", () => {
       enabled: true,
       username: "gate_user",
       password_set: true,
+      listen: "127.0.0.1",
     });
     const update = vi.spyOn(gateApi, "updateSocksAuth").mockResolvedValue({
       enabled: true,
       username: "proxy_user",
       password_set: true,
+      listen: "127.0.0.1",
     });
     render(<SocksAuthDialog onChanged={() => undefined} onClose={() => undefined} open />, { wrapper });
 
@@ -95,6 +217,39 @@ describe("SocksAuthDialog", () => {
       enabled: true,
       username: "proxy_user",
       password: null,
+      listen: "127.0.0.1",
+    }));
+  });
+
+  it("forces authentication before enabling a public listener", async () => {
+    vi.spyOn(gateApi, "socksAuth").mockResolvedValue({
+      enabled: false,
+      username: "",
+      password_set: false,
+      listen: "127.0.0.1",
+    });
+    const update = vi.spyOn(gateApi, "updateSocksAuth").mockResolvedValue({
+      enabled: true,
+      username: "public_user",
+      password_set: true,
+      listen: "0.0.0.0",
+    });
+    render(<SocksAuthDialog onChanged={() => undefined} onClose={() => undefined} open />, { wrapper });
+
+    fireEvent.click(await screen.findByRole("button", { name: /全部网卡/ }));
+    const toggle = screen.getByRole("checkbox", { name: /要求身份验证/ });
+    expect(toggle).toBeChecked();
+    expect(toggle).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("统一用户名"), { target: { value: "public_user" } });
+    fireEvent.change(screen.getByLabelText("密码"), { target: { value: "p@ssw0rd" } });
+    fireEvent.change(screen.getByLabelText("确认新密码"), { target: { value: "p@ssw0rd" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存认证设置" }));
+
+    await waitFor(() => expect(update).toHaveBeenCalledWith({
+      enabled: true,
+      username: "public_user",
+      password: "p@ssw0rd",
+      listen: "0.0.0.0",
     }));
   });
 });

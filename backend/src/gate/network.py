@@ -33,6 +33,7 @@ class ExecutablePaths:
     ss: str
     openvpn: str
     sing_box: str
+    haproxy: str = "haproxy"
 
     @classmethod
     def discover(cls) -> ExecutablePaths:
@@ -51,6 +52,7 @@ class ExecutablePaths:
             ss=require("ss"),
             openvpn=require("openvpn"),
             sing_box=require("sing-box"),
+            haproxy=require("haproxy"),
         )
 
 
@@ -107,6 +109,7 @@ class LinuxNetworkManager:
         netns_config_root: Path = Path("/etc/netns"),
         socks_auth_path: Path = Path("/etc/gate/socks-auth.json"),
         socks_auth_gid: int | None = None,
+        haproxy_config_path: Path = Path("/etc/haproxy/haproxy.cfg"),
         tunnel_timeout_seconds: float = 30.0,
         socks_timeout_seconds: float = 5.0,
     ) -> None:
@@ -117,6 +120,7 @@ class LinuxNetworkManager:
         self.netns_config_root = netns_config_root
         self.socks_auth_path = socks_auth_path
         self.socks_auth_gid = socks_auth_gid
+        self.haproxy_config_path = haproxy_config_path
         self.tunnel_timeout_seconds = tunnel_timeout_seconds
         self.socks_timeout_seconds = socks_timeout_seconds
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
@@ -592,11 +596,40 @@ class LinuxNetworkManager:
             gid=self.socks_auth_gid,
         )
 
+    async def _install_haproxy_config(self) -> None:
+        from gate.haproxy_config import render_haproxy_config
+
+        path = self.haproxy_config_path
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+        if path.is_symlink():
+            raise NetworkOperationError(f"refusing to replace a symlink: {path}")
+        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        temporary = Path(temporary_name)
+        try:
+            os.fchmod(descriptor, 0o644)
+            content = render_haproxy_config(self.settings).encode("utf-8")
+            offset = 0
+            while offset < len(content):
+                offset += os.write(descriptor, content[offset:])
+            os.fsync(descriptor)
+            os.close(descriptor)
+            descriptor = -1
+            await self.runner.run([self.executables.haproxy, "-c", "-f", str(temporary)])
+            os.replace(temporary, path)
+            await self.runner.run(
+                [self.executables.systemctl, "reload-or-restart", "haproxy.service"]
+            )
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            temporary.unlink(missing_ok=True)
+
     async def update_socks_auth(self, request: UpdateSocksAuthRequest) -> SocksAuthConfig:
         updated = SocksAuthConfig(
             enabled=request.enabled,
             username=request.username,
             password=request.password,
+            listen=request.listen,
         )
         specs = [slot_spec(region, slot) for region in self.settings.regions for slot in ("a", "b")]
         async with AsyncExitStack() as locks:
@@ -619,19 +652,43 @@ class LinuxNetworkManager:
             old_auth_text = (
                 self.socks_auth_path.read_text(encoding="utf-8") if auth_existed else None
             )
+            listener_changed = old_auth.listen != updated.listen
+            credentials_changed = (
+                old_auth.enabled,
+                old_auth.username,
+                old_auth.password,
+            ) != (
+                updated.enabled,
+                updated.username,
+                updated.password,
+            )
+            old_haproxy_text = (
+                self.haproxy_config_path.read_text(encoding="utf-8")
+                if listener_changed and self.haproxy_config_path.exists()
+                else None
+            )
             config_snapshots: dict[Path, str | None] = {}
             try:
                 self._write_socks_auth(updated)
                 self.settings.socks_auth = updated
-                for spec in active_specs:
-                    config_path = self._slot_directory(spec) / "sing-box.json"
-                    config_snapshots[config_path] = (
-                        config_path.read_text(encoding="utf-8") if config_path.exists() else None
-                    )
-                    self._write_socks_config(spec)
-                for spec in active_specs:
-                    await self.runner.run([self.executables.systemctl, "restart", spec.socks_unit])
-                    await self._wait_for_socks(spec)
+                if listener_changed and updated.listen == "127.0.0.1":
+                    await self._install_haproxy_config()
+                if credentials_changed:
+                    for spec in active_specs:
+                        config_path = self._slot_directory(spec) / "sing-box.json"
+                        config_snapshots[config_path] = (
+                            config_path.read_text(encoding="utf-8")
+                            if config_path.exists()
+                            else None
+                        )
+                        self._write_socks_config(spec)
+                    for spec in active_specs:
+                        await self.runner.run(
+                            [self.executables.systemctl, "restart", spec.socks_unit]
+                        )
+                        await self._wait_for_socks(spec)
+                if listener_changed and updated.listen == "0.0.0.0":
+                    await self._install_haproxy_config()
             except Exception as exc:
                 self.settings.socks_auth = old_auth
                 try:
@@ -644,63 +701,98 @@ class LinuxNetworkManager:
                             0o640,
                             gid=self.socks_auth_gid,
                         )
-                    for path, content in config_snapshots.items():
-                        if content is None:
-                            path.unlink(missing_ok=True)
+
+                    async def restore_haproxy() -> None:
+                        if not listener_changed:
+                            return
+                        if old_haproxy_text is None:
+                            self.haproxy_config_path.unlink(missing_ok=True)
                         else:
-                            self._secure_write(path, content, 0o600)
-                    for spec in active_specs:
-                        await self.runner.run(
-                            [self.executables.systemctl, "restart", spec.socks_unit],
-                            check=False,
-                        )
+                            self._secure_atomic_write(
+                                self.haproxy_config_path,
+                                old_haproxy_text,
+                                0o644,
+                            )
+                            await self.runner.run(
+                                [
+                                    self.executables.systemctl,
+                                    "reload-or-restart",
+                                    "haproxy.service",
+                                ],
+                                check=False,
+                            )
+
+                    async def restore_socks_runtime() -> None:
+                        if not credentials_changed:
+                            return
+                        for path, content in config_snapshots.items():
+                            if content is None:
+                                path.unlink(missing_ok=True)
+                            else:
+                                self._secure_write(path, content, 0o600)
+                        for spec in active_specs:
+                            await self.runner.run(
+                                [self.executables.systemctl, "restart", spec.socks_unit],
+                                check=False,
+                            )
+
+                    if old_auth.listen == "0.0.0.0":
+                        await restore_socks_runtime()
+                        await restore_haproxy()
+                    else:
+                        await restore_haproxy()
+                        await restore_socks_runtime()
                 except Exception as rollback_exc:
                     raise NetworkOperationError(
-                        f"SOCKS authentication update and rollback failed: {rollback_exc}"
+                        f"SOCKS access update and rollback failed: {rollback_exc}"
                     ) from exc
-                raise NetworkOperationError(f"SOCKS authentication update failed: {exc}") from exc
+                raise NetworkOperationError(f"SOCKS access update failed: {exc}") from exc
         return updated
 
     async def inspect(self) -> list[dict[str, object]]:
+        namespace_result = await self.runner.run(
+            [self.executables.ip, "netns", "list"],
+            check=False,
+        )
+        namespaces = {
+            line.split(maxsplit=1)[0] for line in namespace_result.stdout.splitlines() if line
+        }
+        specs = [slot_spec(region, slot) for region in self.settings.regions for slot in ("a", "b")]
+        units = [unit for spec in specs for unit in (spec.openvpn_unit, spec.socks_unit)]
+        unit_result = await self.runner.run(
+            [self.executables.systemctl, "is-active", *units],
+            check=False,
+        )
+        unit_states = dict(zip(units, unit_result.stdout.splitlines(), strict=False))
         result: list[dict[str, object]] = []
-        for region in self.settings.regions:
-            for slot in ("a", "b"):
-                spec = slot_spec(region, slot)
-                exists = await self.namespace_exists(spec)
-                tunnel_up = False
-                if exists:
-                    tunnel = await self.runner.run(
-                        [
-                            self.executables.ip,
-                            "netns",
-                            "exec",
-                            spec.namespace,
-                            self.executables.ip,
-                            "link",
-                            "show",
-                            "tun0",
-                        ],
-                        check=False,
-                    )
-                    tunnel_up = tunnel.returncode == 0
-                openvpn = await self.runner.run(
-                    [self.executables.systemctl, "is-active", spec.openvpn_unit],
+        for spec in specs:
+            exists = spec.namespace in namespaces
+            tunnel_up = False
+            if exists:
+                tunnel = await self.runner.run(
+                    [
+                        self.executables.ip,
+                        "netns",
+                        "exec",
+                        spec.namespace,
+                        self.executables.ip,
+                        "link",
+                        "show",
+                        "tun0",
+                    ],
                     check=False,
                 )
-                socks = await self.runner.run(
-                    [self.executables.systemctl, "is-active", spec.socks_unit],
-                    check=False,
-                )
-                result.append(
-                    {
-                        "region_id": region.id,
-                        "slot": slot,
-                        "namespace": spec.namespace,
-                        "namespace_ip": spec.namespace_ip,
-                        "exists": exists,
-                        "tunnel_up": tunnel_up,
-                        "openvpn_active": openvpn.stdout.strip() == "active",
-                        "socks_active": socks.stdout.strip() == "active",
-                    }
-                )
+                tunnel_up = tunnel.returncode == 0
+            result.append(
+                {
+                    "region_id": spec.region_id,
+                    "slot": spec.slot,
+                    "namespace": spec.namespace,
+                    "namespace_ip": spec.namespace_ip,
+                    "exists": exists,
+                    "tunnel_up": tunnel_up,
+                    "openvpn_active": unit_states.get(spec.openvpn_unit) == "active",
+                    "socks_active": unit_states.get(spec.socks_unit) == "active",
+                }
+            )
         return result

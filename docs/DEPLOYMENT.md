@@ -2,7 +2,8 @@
 
 本文适用于把 GitHub 已编译的 Gate Release 直接安装到 Debian VPS。构建、测试、前端打包和
 Python 依赖下载均由 GitHub Actions 完成；VPS 不需要安装 Git、Node.js、npm、编译器，也不需要
-访问 PyPI。默认方案只让 WebUI 和 SOCKS5 监听 `127.0.0.1`，通过 SSH 本地转发使用；
+访问 PyPI。默认方案只让 WebUI 和 SOCKS5 监听 `127.0.0.1`，通过 SSH 本地转发使用；SOCKS
+可在 WebUI 改为监听全部网卡，但必须同时启用统一认证和来源 IP 防火墙；
 Cloudflare Tunnel 仅用于 WebUI，不能代替 SOCKS5 的 SSH 转发。
 
 ## 1. 支持范围与资源
@@ -99,7 +100,8 @@ curl.exe --fail --max-time 20 `
 首次登录后，可点击右上角钥匙图标修改管理密码。修改会写入 Gate 数据库并轮换会话密钥，其他
 浏览器中的旧会话会立即失效。
 
-SOCKS 认证默认关闭。点击右上角盾牌用户图标，可启用所有 SOCKS 入口共用的用户名和密码。
+SOCKS 认证默认关闭。点击右上角盾牌用户图标，可启用所有 SOCKS 入口共用的用户名和密码，
+也可以把监听范围从“仅本机”切换为“全部网卡”。
 首次启用必须设置密码；之后密码留空表示保留当前密码。保存会重载活动 sing-box 服务，现有
 代理连接可能中断。启用后用以下命令测试，curl 会交互提示代理密码，密码不会写入命令历史：
 
@@ -114,6 +116,13 @@ curl.exe --fail --max-time 20 `
 ASCII 字符。Gate 不向 API 或 WebUI 回显密码。由于 sing-box 运行和内部探测需要可恢复凭据，
 密码由 root worker 保存到 `/etc/gate/socks-auth.json`，权限为 `0640 root:gate-worker`，不得提交
 到 Git 或发送到日志。
+
+选择“全部网卡”后，SOCKS 端口监听 `0.0.0.0`，WebUI 会强制开启认证，后端和特权 worker
+也会再次校验。还必须在云安全组或 VPS 防火墙中仅允许可信来源 IP，不能把密码当作唯一的公网
+防护。关闭认证前必须先切回“仅本机”。WebUI 本身仍只监听 `127.0.0.1:18080`。
+
+页面顶部“自动检查”关闭后，定时发现、健康检查和自动优化会暂停，手动测试与切换仍可用。
+锁定单个入口只禁止自动换节点，并不会停止该入口的健康检查。
 
 ## 5. 可选：通过 Cloudflare Tunnel 访问 WebUI
 
@@ -189,9 +198,9 @@ sh /tmp/gate-install.sh
 安装指定版本时，安装器和目标资产使用同一个 tag：
 
 ```sh
-curl -fL https://github.com/ClaraCora/gate/releases/download/v0.1.4/gate-install.sh \
+curl -fL https://github.com/ClaraCora/gate/releases/download/v0.1.5/gate-install.sh \
   -o /tmp/gate-install.sh
-sh /tmp/gate-install.sh --version v0.1.4
+sh /tmp/gate-install.sh --version v0.1.5
 ```
 
 重复安装当前版本是幂等操作；新版本会原子切换 `/opt/gate/current`，就绪检查失败时自动恢复上一
@@ -292,7 +301,7 @@ sh /tmp/gate-install.sh
 - `gate-install.sh`：VPS 一键安装器。
 
 维护者发布新版本时，应先同步 `pyproject.toml`、`gate.__version__` 和前端版本，再推送同名 tag。
-例如版本为 `0.1.4` 时，tag 必须为 `v0.1.4`；版本不一致会使工作流立即失败。
+例如版本为 `0.1.5` 时，tag 必须为 `v0.1.5`；版本不一致会使工作流立即失败。
 
 `scripts/deploy.ps1` 仍可用于开发或 GitHub Releases 故障时的应急发布，但它需要 Windows 本机
 具备开发环境，并可能在 VPS 从 PyPI 安装依赖，不是常规生产路径。
@@ -302,11 +311,12 @@ sh /tmp/gate-install.sh
 部署或迁移后至少确认：
 
 1. 四个服务为 active，就绪接口返回 `ok`。
-2. WebUI 能登录、修改管理密码和 SOCKS 认证，并能看到出口、任务、事件三个导航入口。
+2. WebUI 能登录、修改管理密码和 SOCKS 接入设置，并能看到出口、任务、事件三个导航入口。
 3. 点击右侧出口能打开候选弹窗，IP 搜索和各排序方式正常。
-4. 已启用入口的 SOCKS 请求携带当前凭据后返回目标国家，且不等于 VPS 原始公网 IP。
-5. 停止活动 OpenVPN 后，SOCKS 请求失败而不是回落到 VPS 公网出口。
-6. WebUI 和 SOCKS 仅监听回环地址，Cloudflare Access 或 SSH 负责访问控制。
+4. 地区入口表逐行显示当前出口 IP；全局“自动检查”开关关闭后刷新页面仍保持关闭。
+5. 已启用入口的 SOCKS 请求携带当前凭据后返回目标国家，且不等于 VPS 原始公网 IP。
+6. 停止活动 OpenVPN 后，SOCKS 请求失败而不是回落到 VPS 公网出口。
+7. WebUI 始终只监听回环地址；SOCKS 若监听全部网卡，认证已开启且防火墙只放行可信来源。
 
 更细的日志、网络 namespace、HAProxy、防火墙和 fail-closed 诊断见
 [运维手册](OPERATIONS.md)。

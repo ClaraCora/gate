@@ -4,6 +4,7 @@ import json
 import os
 import re
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 
 import yaml
@@ -76,9 +77,12 @@ class SocksAuthConfig(BaseModel):
     enabled: bool = False
     username: str = ""
     password: str = ""
+    listen: Literal["127.0.0.1", "0.0.0.0"] = "127.0.0.1"
 
     @model_validator(mode="after")
     def validate_credentials(self) -> SocksAuthConfig:
+        if self.listen == "0.0.0.0" and not self.enabled:
+            raise ValueError("public SOCKS listening requires authentication")
         if not self.enabled:
             if self.username or self.password:
                 raise ValueError("disabled SOCKS authentication must not retain credentials")

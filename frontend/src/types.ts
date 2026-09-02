@@ -18,12 +18,20 @@ export interface SocksAuthState {
   enabled: boolean;
   username: string;
   password_set: boolean;
+  listen: SocksListenAddress;
 }
+
+export type SocksListenAddress = "127.0.0.1" | "0.0.0.0";
 
 export interface SocksAuthUpdate {
   enabled: boolean;
   username: string;
   password: string | null;
+  listen: SocksListenAddress;
+}
+
+export interface AutomationState {
+  enabled: boolean;
 }
 
 export interface Region {

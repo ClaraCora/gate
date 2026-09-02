@@ -112,6 +112,16 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
 .stream-state i { width: 7px; height: 7px; background: #d2a349; border-radius: 50%; }
 .stream-state--live i { background: #59b6a8; }
 .stream-state--offline i { background: #df6b60; }
+.automation-control { align-items: center; display: inline-flex; gap: 7px; color: #4f5951; cursor: pointer; font-size: 0.72rem; white-space: nowrap; }
+.automation-control > span { font-weight: 700; }
+.automation-control input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.automation-control i { position: relative; width: 34px; height: 19px; background: #7c857d; border-radius: 999px; transition: background-color 180ms ease-out; }
+.automation-control i::after { position: absolute; top: 2px; left: 2px; width: 15px; height: 15px; background: #fff; border-radius: 50%; box-shadow: 0 2px 5px rgba(22, 29, 23, 0.24); content: ""; transition: transform 180ms cubic-bezier(0.16, 1, 0.3, 1); }
+.automation-control input:checked + i { background: var(--teal); }
+.automation-control input:checked + i::after { transform: translateX(15px); }
+.automation-control input:focus-visible + i { outline: 3px solid color-mix(in srgb, var(--focus) 70%, white); outline-offset: 2px; }
+.automation-control input:disabled + i { cursor: not-allowed; opacity: 0.5; }
+.automation-control em { min-width: 42px; color: var(--text-muted); font-size: 0.66rem; font-style: normal; }
 
 .port-rail { align-items: stretch; display: grid; grid-template-columns: 126px 1fr 126px; min-height: 112px; padding: 18px 24px; background: #dfe4de; border-bottom: 1px solid var(--line-strong); }
 .port-rail__legend { align-items: center; display: flex; gap: 8px; justify-content: flex-start; color: var(--text-muted); font-size: 0.74rem; font-weight: 700; }
@@ -157,6 +167,8 @@ td { padding: 12px 10px; border-bottom: 1px solid var(--line); font-size: 0.78re
 .region-name { display: flex; flex-direction: column; gap: 4px; min-width: 72px; padding: 0; color: inherit; text-align: left; background: transparent; border: 0; cursor: pointer; }
 .region-name strong { font-size: 0.84rem; }
 .region-name span { color: var(--text-muted); font: 0.72rem/1 "Cascadia Mono", Consolas, monospace; }
+.egress-ip { color: var(--text); font: 700 0.72rem/1.2 "Cascadia Mono", Consolas, monospace; white-space: nowrap; }
+.egress-ip--empty { color: var(--text-muted); font-family: inherit; font-weight: 600; }
 .route-toggle { align-items: center; display: inline-flex; gap: 7px; min-height: 30px; padding: 3px 0; color: var(--text-muted); background: transparent; border: 0; cursor: pointer; }
 .route-toggle:disabled { cursor: not-allowed; opacity: 0.48; }
 .route-toggle__track { position: relative; display: block; flex: none; width: 32px; height: 18px; background: #a8b0a9; border: 1px solid #8f9890; border-radius: 999px; transition: background-color 160ms ease-out, border-color 160ms ease-out; }
@@ -315,6 +327,14 @@ td { padding: 12px 10px; border-bottom: 1px solid var(--line); font-size: 0.78re
 .socks-auth-error .button { margin-top: 14px; }
 .socks-auth-dialog { max-height: calc(100vh - 20px); overflow: auto; }
 .socks-auth-dialog .dialog-heading { position: sticky; top: 0; z-index: 2; }
+.listen-setting { margin: -2px 0 20px; padding: 0 0 18px; border: 0; border-bottom: 1px solid var(--line); }
+.listen-setting legend { margin-bottom: 9px; color: var(--text); font-size: 0.8rem; font-weight: 700; }
+.listen-segmented { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; background: #dce1dc; border-radius: 6px; }
+.listen-segmented button { display: flex; flex-direction: column; gap: 3px; min-height: 48px; padding: 7px 10px; text-align: left; color: var(--text-muted); background: transparent; border: 0; border-radius: 4px; cursor: pointer; }
+.listen-segmented button:hover { color: var(--text); background: rgba(255,255,255,0.52); }
+.listen-segmented button[aria-pressed="true"] { color: var(--text); background: #fff; box-shadow: 0 2px 7px rgba(26, 34, 27, 0.12); }
+.listen-segmented strong { font-size: 0.76rem; }
+.listen-segmented small { font: 0.66rem/1.1 "Cascadia Mono", Consolas, monospace; }
 .password-form > .auth-toggle { align-items: center; display: flex; justify-content: space-between; gap: 18px; margin: -2px 0 20px; padding: 0 0 16px; border-bottom: 1px solid var(--line); cursor: pointer; }
 .auth-toggle > span { display: flex; flex: 1; flex-direction: column; gap: 4px; }
 .auth-toggle strong { color: var(--text); font-size: 0.8rem; }
@@ -325,6 +345,7 @@ td { padding: 12px 10px; border-bottom: 1px solid var(--line); font-size: 0.78re
 .auth-toggle input:checked + i { background: var(--teal); }
 .auth-toggle input:checked + i::after { transform: translateX(18px); }
 .auth-toggle input:focus-visible + i { outline: 3px solid color-mix(in srgb, var(--focus) 70%, white); outline-offset: 2px; }
+.auth-toggle input:disabled + i { cursor: not-allowed; opacity: 0.62; }
 
 @media (max-width: 1120px) {
   .command-bar { grid-template-columns: minmax(145px, 1fr) auto minmax(145px, 1fr); }
@@ -332,7 +353,7 @@ td { padding: 12px 10px; border-bottom: 1px solid var(--line); font-size: 0.78re
   .port-rail { grid-template-columns: 96px 1fr 96px; padding-inline: 18px; }
   .workspace { grid-template-columns: minmax(0, 1.55fr) minmax(285px, 0.85fr); }
   .routes-panel, .inspector { padding-inline: 18px; }
-  .region-table th:nth-child(6), .region-table td:nth-child(6) { display: none; }
+  .region-table th:nth-child(7), .region-table td:nth-child(7) { display: none; }
 }
 
 @media (max-width: 800px) {
@@ -382,10 +403,11 @@ td { padding: 12px 10px; border-bottom: 1px solid var(--line); font-size: 0.78re
   .login-workbench .brand-lockup { margin-bottom: 30px; }
   .login-workbench h1 { font-size: 1.75rem; }
   .system-count { display: none; }
+  .automation-control em { display: none; }
   .command-actions { gap: 4px; }
   .primary-nav button { padding-inline: 7px; }
-  .region-table { min-width: 560px; }
-  .region-table th:nth-child(5), .region-table td:nth-child(5) { display: none; }
+  .region-table { min-width: 500px; }
+  .region-table th:nth-child(5), .region-table td:nth-child(5), .region-table th:nth-child(6), .region-table td:nth-child(6) { display: none; }
   .inspector__controls { display: flex; }
   .signal-grid { grid-template-columns: 1fr; }
   .route-trace { grid-template-columns: 54px 1fr 44px 1fr 54px; }

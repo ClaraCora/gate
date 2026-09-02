@@ -21,7 +21,7 @@ from gate.database import Database
 from gate.discovery import DiscoveryService
 from gate.domain import FeedParseResult, VpnGateNode
 from gate.errors import GateError
-from gate.worker_protocol import HealthRequest, UpdateSocksAuthRequest
+from gate.worker_protocol import HealthRequest, InspectRequest, UpdateSocksAuthRequest
 from gate.worker_protocol import Request as WorkerRequest
 
 
@@ -47,8 +47,19 @@ class RecordingWorker:
                 "enabled": request.enabled,
                 "username": request.username,
                 "password_set": bool(request.password),
+                "listen": request.listen,
             }
         return {}
+
+
+class InspectingWorker:
+    def __init__(self) -> None:
+        self.inspect_count = 0
+
+    async def request(self, request: WorkerRequest) -> dict[str, object]:
+        assert isinstance(request, InspectRequest)
+        self.inspect_count += 1
+        return {"slots": []}
 
 
 @dataclass
@@ -112,6 +123,68 @@ def _node(encoded_profile: str) -> VpnGateNode:
 
 
 @pytest.mark.asyncio
+async def test_automation_api_persists_global_switch(tmp_path: Path) -> None:
+    database_url = _database_url(tmp_path / "automation-api.db")
+    settings = _settings(tmp_path / "automation-api.db")
+    database = Database(database_url)
+    app = create_app(
+        settings,
+        database=database,
+        reconcile_on_startup=False,
+        automation_on_startup=False,
+    )
+
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            initial = await client.get("/api/v1/automation")
+            disabled = await client.put(
+                "/api/v1/automation",
+                json={"enabled": False},
+                headers=MUTATION_HEADERS,
+            )
+            events = await client.get("/api/v1/events")
+
+    assert initial.json() == {"enabled": True}
+    assert disabled.json() == {"enabled": False}
+    assert events.json()[0]["message"] == "自动检查已关闭"
+
+    restarted = create_app(
+        settings,
+        database=Database(database_url),
+        reconcile_on_startup=False,
+        automation_on_startup=False,
+    )
+    async with restarted.router.lifespan_context(restarted):
+        transport = httpx.ASGITransport(app=restarted)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            persisted = await client.get("/api/v1/automation")
+
+    assert persisted.json() == {"enabled": False}
+
+
+@pytest.mark.asyncio
+async def test_runtime_slot_reads_are_cached(tmp_path: Path) -> None:
+    worker = InspectingWorker()
+    app = create_app(
+        _settings(tmp_path / "slot-cache.db"),
+        worker=worker,
+        reconcile_on_startup=False,
+        automation_on_startup=False,
+    )
+
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            first = await client.get("/api/v1/runtime/slots")
+            second = await client.get("/api/v1/runtime/slots")
+
+    assert first.json() == []
+    assert second.json() == []
+    assert worker.inspect_count == 1
+
+
+@pytest.mark.asyncio
 async def test_socks_auth_api_hides_password_preserves_it_and_clears_on_disable(
     tmp_path: Path,
 ) -> None:
@@ -156,12 +229,18 @@ async def test_socks_auth_api_hides_password_preserves_it_and_clears_on_disable(
             )
             events = await client.get("/api/v1/events")
 
-    assert initial.json() == {"enabled": False, "username": "", "password_set": False}
+    assert initial.json() == {
+        "enabled": False,
+        "username": "",
+        "password_set": False,
+        "listen": "127.0.0.1",
+    }
     assert missing_password.status_code == 422
     assert enabled.json() == {
         "enabled": True,
         "username": "gate_user",
         "password_set": True,
+        "listen": "127.0.0.1",
     }
     assert visible.json() == enabled.json()
     assert "p@ss:/?#[]!word" not in visible.text
@@ -170,10 +249,62 @@ async def test_socks_auth_api_hides_password_preserves_it_and_clears_on_disable(
         request for request in worker.requests if isinstance(request, UpdateSocksAuthRequest)
     ]
     assert updates[1].password == "p@ss:/?#[]!word"
-    assert disabled.json() == {"enabled": False, "username": "", "password_set": False}
+    assert disabled.json() == {
+        "enabled": False,
+        "username": "",
+        "password_set": False,
+        "listen": "127.0.0.1",
+    }
     assert settings.socks_auth.enabled is False
     assert events.json()[0]["code"] == "SOCKS_AUTH_UPDATED"
     assert "p@ss:/?#[]!word" not in json.dumps(events.json())
+
+
+@pytest.mark.asyncio
+async def test_public_socks_listener_requires_authentication(tmp_path: Path) -> None:
+    settings = _settings(tmp_path / "public-listener.db")
+    worker = RecordingWorker()
+    app = create_app(
+        settings,
+        worker=worker,
+        reconcile_on_startup=False,
+        automation_on_startup=False,
+    )
+
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            rejected = await client.put(
+                "/api/v1/socks-auth",
+                json={"enabled": False, "listen": "0.0.0.0"},
+                headers=MUTATION_HEADERS,
+            )
+            enabled = await client.put(
+                "/api/v1/socks-auth",
+                json={
+                    "enabled": True,
+                    "username": "public_user",
+                    "password": "strong!proxy#password",
+                    "listen": "0.0.0.0",
+                },
+                headers=MUTATION_HEADERS,
+            )
+            cannot_disable = await client.put(
+                "/api/v1/socks-auth",
+                json={"enabled": False},
+                headers=MUTATION_HEADERS,
+            )
+
+    assert rejected.status_code == 422
+    assert rejected.json()["detail"] == "公网监听必须启用 SOCKS 用户名和密码认证"
+    assert enabled.json()["listen"] == "0.0.0.0"
+    assert enabled.json()["enabled"] is True
+    assert cannot_disable.status_code == 422
+    updates = [
+        request for request in worker.requests if isinstance(request, UpdateSocksAuthRequest)
+    ]
+    assert len(updates) == 1
+    assert updates[0].listen == "0.0.0.0"
 
 
 @pytest.mark.asyncio

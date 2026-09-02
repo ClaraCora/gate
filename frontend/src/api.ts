@@ -1,4 +1,5 @@
 import type {
+  AutomationState,
   Candidate,
   DiscoveryResult,
   GateEvent,
@@ -89,6 +90,12 @@ export const gateApi = {
     request<SocksAuthState>("/api/v1/socks-auth", {
       method: "PUT",
       body: JSON.stringify(update),
+    }),
+  automation: () => request<AutomationState>("/api/v1/automation"),
+  updateAutomation: (enabled: boolean) =>
+    request<AutomationState>("/api/v1/automation", {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
     }),
   regions: () => request<Region[]>("/api/v1/regions"),
   candidates: (regionId: string) =>

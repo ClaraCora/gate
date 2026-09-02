@@ -29,9 +29,15 @@ describe("event presentation", () => {
     expect(eventDescription(current)).toBe(current.message);
   });
 
-  it("labels SOCKS authentication changes in Chinese", () => {
+  it("labels SOCKS access changes in Chinese", () => {
     const auth = event({ code: "SOCKS_AUTH_UPDATED", message: "SOCKS 统一认证已启用" });
-    expect(eventTitle(auth.code)).toBe("SOCKS 认证已更新");
+    expect(eventTitle(auth.code)).toBe("SOCKS 接入设置已更新");
     expect(eventDescription(auth)).toBe(auth.message);
+  });
+
+  it("labels automation changes in Chinese", () => {
+    const automation = event({ code: "AUTOMATION_ENABLED_CHANGED", message: "" });
+    expect(eventTitle(automation.code)).toBe("自动检查设置已更新");
+    expect(eventDescription(automation)).toBe("自动检查开关已更新。");
   });
 });

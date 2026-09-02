@@ -59,6 +59,7 @@ class UpdateSocksAuthRequest(WorkerRequest):
     enabled: bool
     username: str = Field(default="", max_length=32)
     password: str = Field(default="", max_length=128)
+    listen: Literal["127.0.0.1", "0.0.0.0"] = "127.0.0.1"
 
     @model_validator(mode="after")
     def validate_credentials(self) -> UpdateSocksAuthRequest:
@@ -66,6 +67,7 @@ class UpdateSocksAuthRequest(WorkerRequest):
             enabled=self.enabled,
             username=self.username,
             password=self.password,
+            listen=self.listen,
         )
         return self
 

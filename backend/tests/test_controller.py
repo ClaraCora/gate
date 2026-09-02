@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 from datetime import UTC, datetime
 from pathlib import Path
@@ -214,4 +215,36 @@ async def test_locked_region_stays_unavailable_after_health_threshold(
     assert coordinator.switches == []
     events = await database.list_events()
     assert any(event.code == "LOCKED_REGION_UNAVAILABLE" for event in events)
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_disabled_automation_skips_periodic_work_until_reenabled(tmp_path: Path) -> None:
+    settings = load_settings().model_copy(
+        update={"database": DatabaseConfig(url=f"sqlite+aiosqlite:///{tmp_path / 'toggle.db'}")}
+    )
+    database = Database(settings.database.url)
+    controller = AutomationController(
+        settings,
+        database,
+        DiscoveryService(database, feed_url="unused"),
+        FakeCoordinator(),
+    )
+    controller.set_enabled(False)
+    called = asyncio.Event()
+
+    async def operation() -> None:
+        called.set()
+
+    task = asyncio.create_task(
+        controller._repeat(operation, 0.01, immediate=True, requires_enabled=True)
+    )
+    await asyncio.sleep(0.03)
+    assert called.is_set() is False
+
+    controller.set_enabled(True)
+    await asyncio.wait_for(called.wait(), timeout=0.2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
     await database.close()

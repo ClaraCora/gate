@@ -53,7 +53,7 @@ sh /tmp/gate-install.sh
 后续更新重新下载并执行同一命令。安装指定版本时使用：
 
 ```sh
-sh /tmp/gate-install.sh --version v0.1.4
+sh /tmp/gate-install.sh --version v0.1.5
 ```
 
 首次安装会在终端输出一次 `Gate WebUI initial admin password`。立即放入密码管理器；脚本只把
@@ -72,8 +72,8 @@ ssh HK-Aliyun "curl --fail --silent http://127.0.0.1:18080/api/v1/health/ready"
 ssh HK-Aliyun "ss -lntp | grep -E ':(18080|11081|11082|11083|11084|11085)[[:space:]]'"
 ```
 
-所有 WebUI 和 SOCKS 监听都必须是 `127.0.0.1`。如果出现 `0.0.0.0` 或 VPS 公网地址，停止
-服务并修正配置，不要依赖云防火墙掩盖错误监听。
+首次安装时所有 WebUI 和 SOCKS 监听都应是 `127.0.0.1`。只有在 WebUI 中明确选择“全部网卡”
+且已启用 SOCKS 认证后，SOCKS 端口才允许显示为 `0.0.0.0`；WebUI 端口始终保持回环监听。
 
 ## 3. Windows 访问
 
@@ -211,6 +211,14 @@ ssh HK-Aliyun "set -eu; temp=/etc/haproxy/.gate-manual.cfg; /opt/gate/current/.v
 日常停用、锁定和恢复自动模式应通过 WebUI 完成，这样操作会进入任务和事件记录。不要用
 `systemctl stop gate-openvpn-*` 代替模式控制。
 
+页面顶部的“自动检查”是全局调度开关。关闭后不再启动定时节点发现、活动出口健康检查和自动
+优化；数据保留清理仍会执行，已经开始的任务会正常结束。手动刷新节点、测试、切换和状态查看
+仍然可用，开关状态写入数据库并在重启后恢复。
+
+“锁定”不是暂停检查：它只禁止该入口自动切换出口，健康检查仍按周期执行。全部入口都锁定时，
+若目标是降低 CPU、命令调用和探测流量，还需要关闭全局“自动检查”。需要释放 OpenVPN 和
+sing-box 常驻资源时，应直接停用不需要的入口。
+
 ## 7. 数据库备份
 
 v0.1 使用 `/var/lib/gate/gate.db` 作为单机 SQLite 基线。最保守的备份是短暂停止控制面与
@@ -281,10 +289,17 @@ curl --fail http://127.0.0.1:18080/api/v1/health/ready
 
 命令要求输入并确认至少 8 个字符的新密码，不会把明文写入命令历史。
 
-SOCKS 凭据从 WebUI 右上角盾牌用户图标管理。启用、换用户名、换密码和关闭认证都会重载全部
-活动 SOCKS 服务并写入中文事件；密码不会回显。关闭认证会从
+SOCKS 接入设置从 WebUI 右上角盾牌用户图标管理。可选择仅监听 `127.0.0.1` 或监听全部网卡
+`0.0.0.0`。选择全部网卡会强制启用统一用户名和密码认证，后端与 root worker 都会拒绝任何
+“公网监听但无认证”的配置。监听变更会先校验 HAProxy 配置再原子替换和重载。
+
+启用、换用户名、换密码和关闭认证会重载全部活动 SOCKS 服务并写入中文事件；密码不会回显。
+关闭认证前必须先把监听范围切回“仅本机”。关闭认证会从
 `/etc/gate/socks-auth.json` 清除用户名和密码。直接编辑该文件不会热加载，不属于受支持的轮换
 方式。轮换后以 `curl.exe --proxy-user <用户名>` 验证至少一个活动入口。
+
+使用 `0.0.0.0` 时还必须在云安全组或 VPS 防火墙中仅放行可信客户端 IP，并确认所有客户端都
+使用强密码。`0.0.0.0` 表示监听全部 IPv4 网卡，不等于已配置访问控制。
 
 ## 11. 发布回滚
 
@@ -308,16 +323,15 @@ release 目录复制覆盖另一个目录。
 这项测试会短暂中断日本出口。先确认有控制台访问和恢复窗口。
 
 1. 在 WebUI 将日本设为锁定，记录当前活动 slot 和出口 IP。
-2. 暂停控制循环，避免测试期间自动切换。
+2. 关闭页面顶部的“自动检查”，避免测试期间自动切换。
 3. 停止活动 OpenVPN unit，但保留 HAProxy 和 SOCKS。
 4. 通过 `11081` 请求应超时或失败，绝不能返回 VPS 原始公网 IP。
-5. 恢复 API，通过 WebUI 重新连接并验证日本出口。
+5. 通过 WebUI 手动重新连接并验证日本出口，然后恢复自动检查设置。
 
 VPS 上：
 
 ```sh
 vps_ip="$(curl -4fsS https://api.ipify.org)"
-systemctl stop gate-api
 systemctl list-units --state=active --plain --no-legend 'gate-openvpn-jp-*.service'
 systemctl stop gate-openvpn-jp-a.service  # 使用上一步实际活动 unit
 printf 'VPS public IP: %s\n' "$vps_ip"
@@ -333,9 +347,7 @@ curl.exe --fail --max-time 15 --proxy socks5h://127.0.0.1:11081 --proxy-user gat
 
 期望命令失败。完成后：
 
-```powershell
-ssh HK-Aliyun "systemctl start gate-api"
-```
+在 WebUI 手动重新连接日本入口，确认恢复后重新开启“自动检查”。
 
 若代理请求成功且返回 `vps_ip`，立即停止 `haproxy`，保留现场日志和 namespace 规则，并将其
 视为阻断发布的问题。

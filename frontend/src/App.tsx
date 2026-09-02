@@ -52,6 +52,7 @@ import type {
   RegionStatus,
   RuntimeSlot,
   SessionState,
+  SocksListenAddress,
   SocksAuthState,
 } from "./types";
 
@@ -210,23 +211,60 @@ function LoginView({ onAuthenticated }: { onAuthenticated: (value: SessionState)
 
 type StreamState = "connecting" | "live" | "offline";
 
-function useGateStream(enabled: boolean): StreamState {
+export function useGateStream(enabled: boolean): StreamState {
   const queryClient = useQueryClient();
   const [state, setState] = useState<StreamState>("connecting");
   useEffect(() => {
     if (!enabled) return;
     const source = new EventSource("/api/v1/events/stream");
+    let refreshTimer: number | null = null;
     source.onopen = () => setState("live");
     source.onerror = () => setState("offline");
     source.addEventListener("gate-event", () => {
-      void queryClient.invalidateQueries({ queryKey: ["regions"] });
-      void queryClient.invalidateQueries({ queryKey: ["jobs"] });
-      void queryClient.invalidateQueries({ queryKey: ["events"] });
-      void queryClient.invalidateQueries({ queryKey: ["slots"] });
+      if (refreshTimer !== null) return;
+      refreshTimer = window.setTimeout(() => {
+        refreshTimer = null;
+        void queryClient.invalidateQueries({ queryKey: ["regions"] });
+        void queryClient.invalidateQueries({ queryKey: ["jobs"] });
+        void queryClient.invalidateQueries({ queryKey: ["events"] });
+        void queryClient.invalidateQueries({ queryKey: ["slots"] });
+        void queryClient.invalidateQueries({ queryKey: ["automation"] });
+        void queryClient.invalidateQueries({ queryKey: ["socks-auth"] });
+      }, 500);
     });
-    return () => source.close();
+    return () => {
+      source.close();
+      if (refreshTimer !== null) window.clearTimeout(refreshTimer);
+    };
   }, [enabled, queryClient]);
   return state;
+}
+
+export function AutomationControl({
+  enabled,
+  disabled,
+  pending,
+  onChange,
+}: {
+  enabled: boolean;
+  disabled: boolean;
+  pending: boolean;
+  onChange: (enabled: boolean) => void;
+}) {
+  return (
+    <label className="automation-control">
+      <span>自动检查</span>
+      <input
+        aria-label="自动检查"
+        checked={enabled}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.checked)}
+        type="checkbox"
+      />
+      <i aria-hidden="true" />
+      <em>{pending ? "正在更新" : enabled ? "运行中" : "已暂停"}</em>
+    </label>
+  );
 }
 
 function PortRail({
@@ -291,7 +329,7 @@ function SlotPair({ slots, unavailable = false }: { slots: RuntimeSlot[]; unavai
   );
 }
 
-function RegionTable({
+export function RegionTable({
   regions,
   slots,
   jobs,
@@ -300,6 +338,7 @@ function RegionTable({
   onToggle,
   modePendingRegionId,
   runtimeUnavailable,
+  listen,
 }: {
   regions: Region[];
   slots: RuntimeSlot[];
@@ -309,6 +348,7 @@ function RegionTable({
   onToggle: (region: Region) => void;
   modePendingRegionId: string | null;
   runtimeUnavailable: boolean;
+  listen: SocksListenAddress;
 }) {
   const grouped = new Map<string, Region[]>();
   for (const region of regions) {
@@ -322,7 +362,7 @@ function RegionTable({
       <table className="region-table">
         <thead>
           <tr>
-            <th>地区 / 端口</th><th>出口</th><th>线路状态</th><th>A/B 数据面</th><th>候选</th><th>更新时间</th>
+            <th>地区 / 端口</th><th>出口 IP</th><th>模式</th><th>线路状态</th><th>A/B 数据面</th><th>候选</th><th>更新时间</th>
           </tr>
         </thead>
         <tbody>
@@ -332,7 +372,7 @@ function RegionTable({
             return (
               <Fragment key={groupId}>
                 <tr className="region-group-row">
-                  <th colSpan={6} scope="rowgroup">
+                  <th colSpan={7} scope="rowgroup">
                     <span className="region-group-content">
                       <span aria-label={groupLabel(first)} className="region-group-flag" role="img">{countryFlag(first.countries[0] ?? "")}</span>
                       <strong>{groupLabel(first)}</strong>
@@ -351,9 +391,10 @@ function RegionTable({
                       <td>
                         <button className="region-name" onClick={() => onSelect(region.id)} type="button">
                           <strong>{entryLabel(region)}</strong>
-                          <span>127.0.0.1:{region.socks_port}</span>
+                          <span>{listen}:{region.socks_port}</span>
                         </button>
                       </td>
+                      <td><span className={`egress-ip ${region.active_egress_ip ? "" : "egress-ip--empty"}`}>{region.active_egress_ip ?? "未分配"}</span></td>
                       <td onClick={(event) => event.stopPropagation()}>
                         <RegionToggle
                           disabled={modePendingRegionId === region.id || Boolean(activeJob)}
@@ -452,6 +493,7 @@ function RegionInspector({
   onCandidates,
   onProbe,
   onReconnect,
+  listen,
 }: {
   region: Region;
   activeCandidate: Candidate | undefined;
@@ -466,11 +508,12 @@ function RegionInspector({
   onCandidates: () => void;
   onProbe: () => void;
   onReconnect: () => void;
+  listen: SocksListenAddress;
 }) {
   return (
     <aside className="inspector" aria-labelledby="inspector-title">
       <div className="inspector__heading">
-        <div><h2 id="inspector-title">{entryLabel(region)}</h2><span className="port-address">127.0.0.1:{region.socks_port} · {groupLabel(region)}</span></div>
+        <div><h2 id="inspector-title">{entryLabel(region)}</h2><span className="port-address">{listen}:{region.socks_port} · {groupLabel(region)}</span></div>
         <StatusBadge status={region.status} />
       </div>
       <div className="route-trace" aria-label="当前路由">
@@ -904,6 +947,7 @@ export function SocksAuthDialog({
   const queryClient = useQueryClient();
   const ref = useRef<HTMLDialogElement>(null);
   const [enabled, setEnabled] = useState(false);
+  const [listen, setListen] = useState<SocksListenAddress>("127.0.0.1");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [confirmation, setConfirmation] = useState("");
@@ -920,6 +964,7 @@ export function SocksAuthDialog({
       enabled,
       username: enabled ? username : "",
       password: enabled && password ? password : null,
+      listen,
     }),
     onSuccess: (state) => {
       queryClient.setQueryData(["socks-auth"], state);
@@ -939,6 +984,7 @@ export function SocksAuthDialog({
   useEffect(() => {
     if (!open || !authQuery.data) return;
     setEnabled(authQuery.data.enabled);
+    setListen(authQuery.data.listen);
     setUsername(authQuery.data.username);
     setPassword("");
     setConfirmation("");
@@ -956,6 +1002,10 @@ export function SocksAuthDialog({
   };
 
   const validate = (): boolean => {
+    if (listen === "0.0.0.0" && !enabled) {
+      setValidationError("公网监听必须启用 SOCKS 用户名和密码认证");
+      return false;
+    }
     if (!enabled) return true;
     if (!/^[A-Za-z0-9._-]{3,32}$/.test(username)) {
       setValidationError("用户名须为 3-32 位字母、数字、点、下划线或连字符");
@@ -983,8 +1033,8 @@ export function SocksAuthDialog({
   return (
     <dialog className="switch-dialog password-dialog socks-auth-dialog" onCancel={(event) => { event.preventDefault(); close(); }} ref={ref}>
       <div className="dialog-heading">
-        <div><ShieldUser size={20} /><h2>SOCKS 统一认证</h2></div>
-        <button aria-label="关闭 SOCKS 认证设置" className="icon-button" disabled={mutation.isPending} onClick={close} title="关闭" type="button"><X size={18} /></button>
+        <div><ShieldUser size={20} /><h2>SOCKS 接入设置</h2></div>
+        <button aria-label="关闭 SOCKS 接入设置" className="icon-button" disabled={mutation.isPending} onClick={close} title="关闭" type="button"><X size={18} /></button>
       </div>
       {authQuery.isLoading ? <div className="dialog-loading"><SkeletonRows count={4} /></div> : authQuery.isError ? (
         <div className="empty-state socks-auth-error"><CircleAlert size={24} /><strong>认证设置加载失败</strong><span>{errorMessage(authQuery.error)}</span><button className="button button--secondary" onClick={() => void authQuery.refetch()} type="button"><RefreshCw size={16} />重新加载</button></div>
@@ -999,9 +1049,16 @@ export function SocksAuthDialog({
             mutation.mutate();
           }}
         >
+          <fieldset className="listen-setting">
+            <legend>监听范围</legend>
+            <div aria-label="SOCKS 监听范围" className="listen-segmented" role="group">
+              <button aria-pressed={listen === "127.0.0.1"} onClick={() => setListen("127.0.0.1")} type="button"><strong>仅本机</strong><small>127.0.0.1</small></button>
+              <button aria-pressed={listen === "0.0.0.0"} onClick={() => { setListen("0.0.0.0"); setEnabled(true); }} type="button"><strong>全部网卡</strong><small>0.0.0.0</small></button>
+            </div>
+          </fieldset>
           <label className="auth-toggle" htmlFor="socks-auth-enabled">
-            <span><strong>要求身份验证</strong><small>{enabled ? "所有已启用入口均需凭据" : "当前允许无认证连接"}</small></span>
-            <input checked={enabled} id="socks-auth-enabled" onChange={(event) => { setEnabled(event.target.checked); setValidationError(null); }} type="checkbox" />
+            <span><strong>要求身份验证</strong><small>{listen === "0.0.0.0" ? "公网监听时强制开启" : enabled ? "所有已启用入口均需凭据" : "当前允许无认证连接"}</small></span>
+            <input checked={enabled} disabled={listen === "0.0.0.0"} id="socks-auth-enabled" onChange={(event) => { setEnabled(event.target.checked); setValidationError(null); }} type="checkbox" />
             <i aria-hidden="true" />
           </label>
           <label htmlFor="socks-username">统一用户名</label>
@@ -1050,6 +1107,8 @@ function ConsoleView({
   const [socksAuthOpen, setSocksAuthOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const streamState = useGateStream(session.authenticated);
+  const automationQuery = useQuery({ queryKey: ["automation"], queryFn: gateApi.automation });
+  const socksAuthQuery = useQuery({ queryKey: ["socks-auth"], queryFn: gateApi.socksAuth });
   const regionsQuery = useQuery({ queryKey: ["regions"], queryFn: gateApi.regions, refetchInterval: 10_000 });
   const slotsQuery = useQuery({ queryKey: ["slots"], queryFn: gateApi.slots, refetchInterval: 10_000, retry: false });
   const jobsQuery = useQuery({ queryKey: ["jobs"], queryFn: gateApi.jobs, refetchInterval: 5_000 });
@@ -1130,8 +1189,20 @@ function ConsoleView({
       void queryClient.invalidateQueries({ queryKey: ["jobs"] });
     },
   });
+  const automationMutation = useMutation({
+    mutationFn: gateApi.updateAutomation,
+    onSuccess: (state) => {
+      queryClient.setQueryData(["automation"], state);
+      setNotice(
+        state.enabled
+          ? "自动检查已开启"
+          : "自动检查已关闭；定时刷新、健康检查和自动优化已暂停",
+      );
+      void queryClient.invalidateQueries({ queryKey: ["events"] });
+    },
+  });
 
-  const mutationError = refreshMutation.error ?? probeMutation.error ?? candidateProbeMutation.error ?? modeMutation.error ?? switchMutation.error ?? reconnectMutation.error ?? cancelMutation.error;
+  const mutationError = refreshMutation.error ?? probeMutation.error ?? candidateProbeMutation.error ?? modeMutation.error ?? switchMutation.error ?? reconnectMutation.error ?? cancelMutation.error ?? automationMutation.error;
   const enabledRegions = useMemo(() => regions.filter((region) => region.mode !== "disabled"), [regions]);
   const liveRegions = useMemo(() => enabledRegions.filter((region) => region.status === "healthy").length, [enabledRegions]);
   const runningJobs = useMemo(() => jobs.filter((job) => ["queued", "running"].includes(job.status)).length, [jobs]);
@@ -1159,7 +1230,7 @@ function ConsoleView({
         </nav>
         <div className="command-actions">
           <button className="button button--dark" disabled={refreshMutation.isPending} onClick={() => refreshMutation.mutate()} type="button">{refreshMutation.isPending ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}{refreshMutation.isPending ? "正在发现" : "刷新节点"}</button>
-          <button aria-label="设置 SOCKS 认证" className="icon-button icon-button--dark" onClick={() => setSocksAuthOpen(true)} title="设置 SOCKS 认证" type="button"><ShieldUser size={17} /></button>
+          <button aria-label="设置 SOCKS 接入" className="icon-button icon-button--dark" onClick={() => setSocksAuthOpen(true)} title="设置 SOCKS 接入" type="button"><ShieldUser size={17} /></button>
           {session.security_enabled ? <button aria-label="修改管理密码" className="icon-button icon-button--dark" onClick={() => setPasswordOpen(true)} title="修改管理密码" type="button"><KeyRound size={17} /></button> : null}
           <button aria-label="退出登录" className="icon-button icon-button--dark" onClick={onLogout} title="退出登录" type="button"><LogOut size={17} /></button>
         </div>
@@ -1168,22 +1239,28 @@ function ConsoleView({
       <div className="system-strip">
         <span className={`stream-state stream-state--${streamState}`}><i />{streamState === "live" ? "事件流在线" : streamState === "connecting" ? "连接事件流" : "事件流重连中"}</span>
         <span className="system-count"><ShieldCheck size={15} />{liveRegions}/{enabledRegions.length} 个已启用入口健康</span>
+        <AutomationControl
+          disabled={automationQuery.isLoading || automationQuery.isError || automationMutation.isPending}
+          enabled={automationQuery.data?.enabled ?? false}
+          onChange={(enabled) => automationMutation.mutate(enabled)}
+          pending={automationMutation.isPending}
+        />
       </div>
 
       {regionsQuery.isLoading ? <div className="page-loading"><SkeletonRows count={5} /></div> : regionsQuery.isError ? (
         <main className="fatal-state"><CircleAlert size={28} /><h1>控制面暂时不可用</h1><p>{errorMessage(regionsQuery.error)}</p><button className="button button--primary" onClick={() => void regionsQuery.refetch()} type="button"><RefreshCw size={16} />重新连接</button></main>
       ) : (
         <>
-          {(notice || mutationError) ? <div className={`notice ${mutationError ? "notice--error" : ""}`} role={mutationError ? "alert" : "status"}><span>{mutationError ? <CircleAlert size={16} /> : <CircleCheck size={16} />}{mutationError ? errorMessage(mutationError) : notice}</span><button aria-label="关闭通知" className="icon-button" onClick={() => { setNotice(null); refreshMutation.reset(); probeMutation.reset(); candidateProbeMutation.reset(); modeMutation.reset(); switchMutation.reset(); reconnectMutation.reset(); cancelMutation.reset(); }} type="button"><X size={15} /></button></div> : null}
+          {(notice || mutationError) ? <div className={`notice ${mutationError ? "notice--error" : ""}`} role={mutationError ? "alert" : "status"}><span>{mutationError ? <CircleAlert size={16} /> : <CircleCheck size={16} />}{mutationError ? errorMessage(mutationError) : notice}</span><button aria-label="关闭通知" className="icon-button" onClick={() => { setNotice(null); refreshMutation.reset(); probeMutation.reset(); candidateProbeMutation.reset(); modeMutation.reset(); switchMutation.reset(); reconnectMutation.reset(); cancelMutation.reset(); automationMutation.reset(); }} type="button"><X size={15} /></button></div> : null}
           {view === "routes" ? (
             <>
               <PortRail onSelect={selectRegion} regions={regions} selectedId={selectedId} />
               <main className="workspace">
                 <section className="routes-panel" aria-labelledby="routes-title">
                   <div className="section-heading"><div><h1 id="routes-title">地区入口</h1><p>同一地区可开启多个固定端口，每个端口使用互不重复的真实出口。</p></div><span className="last-sync"><Clock3 size={14} />{formatTime(regions[0]?.updated_at)}</span></div>
-                  <RegionTable jobs={jobs} modePendingRegionId={modeMutation.isPending ? modeMutation.variables?.regionId ?? null : null} onSelect={selectRegion} onToggle={toggleRegion} regions={regions} runtimeUnavailable={slotsQuery.isError} selectedId={selectedId} slots={slots} />
+                  <RegionTable jobs={jobs} listen={socksAuthQuery.data?.listen ?? "127.0.0.1"} modePendingRegionId={modeMutation.isPending ? modeMutation.variables?.regionId ?? null : null} onSelect={selectRegion} onToggle={toggleRegion} regions={regions} runtimeUnavailable={slotsQuery.isError} selectedId={selectedId} slots={slots} />
                 </section>
-                {selectedRegion ? <RegionInspector activeCandidate={activeCandidate} activeJob={activeJob} modePending={modeMutation.isPending && modeMutation.variables?.regionId === selectedRegion.id} onCandidates={() => setCandidateOpen(true)} onMode={(mode) => modeMutation.mutate({ regionId: selectedRegion.id, mode })} onProbe={() => probeMutation.mutate(selectedRegion.id)} onReconnect={() => reconnectMutation.mutate(selectedRegion.id)} onToggle={() => toggleRegion(selectedRegion)} probePending={probeMutation.isPending} reconnectPending={reconnectMutation.isPending} region={selectedRegion} runtimeUnavailable={slotsQuery.isError} slots={selectedSlots} /> : null}
+                {selectedRegion ? <RegionInspector activeCandidate={activeCandidate} activeJob={activeJob} listen={socksAuthQuery.data?.listen ?? "127.0.0.1"} modePending={modeMutation.isPending && modeMutation.variables?.regionId === selectedRegion.id} onCandidates={() => setCandidateOpen(true)} onMode={(mode) => modeMutation.mutate({ regionId: selectedRegion.id, mode })} onProbe={() => probeMutation.mutate(selectedRegion.id)} onReconnect={() => reconnectMutation.mutate(selectedRegion.id)} onToggle={() => toggleRegion(selectedRegion)} probePending={probeMutation.isPending} reconnectPending={reconnectMutation.isPending} region={selectedRegion} runtimeUnavailable={slotsQuery.isError} slots={selectedSlots} /> : null}
               </main>
             </>
           ) : view === "jobs" ? (
@@ -1202,7 +1279,7 @@ function ConsoleView({
       <CandidateDialog busy={Boolean(activeJob) || switchMutation.isPending || candidateProbeMutation.isPending} candidates={candidates} error={candidatesQuery.error} loading={candidatesQuery.isLoading} onClose={() => setCandidateOpen(false)} onProbe={(candidate) => { if (selectedRegion) candidateProbeMutation.mutate({ regionId: selectedRegion.id, nodeId: candidate.id }); }} onRetry={() => void candidatesQuery.refetch()} onSwitch={setSwitchTarget} region={candidateOpen ? selectedRegion : null} />
       <SwitchDialog busy={switchMutation.isPending} candidate={switchTarget} onCancel={() => setSwitchTarget(null)} onConfirm={() => { if (selectedRegion && switchTarget) switchMutation.mutate({ regionId: selectedRegion.id, nodeId: switchTarget.id }); }} region={selectedRegion} />
       <DisableRegionDialog busy={modeMutation.isPending && modeMutation.variables?.mode === "disabled"} onCancel={() => setDisableTarget(null)} onConfirm={() => { if (disableTarget) modeMutation.mutate({ regionId: disableTarget.id, mode: "disabled" }); }} region={disableTarget} />
-      <SocksAuthDialog onChanged={(state) => { setSocksAuthOpen(false); setNotice(state.enabled ? `SOCKS 认证已启用，统一用户名为 ${state.username}` : "SOCKS 认证已关闭"); void queryClient.invalidateQueries({ queryKey: ["events"] }); }} onClose={() => setSocksAuthOpen(false)} open={socksAuthOpen} />
+      <SocksAuthDialog onChanged={(state) => { setSocksAuthOpen(false); setNotice(`SOCKS 已监听 ${state.listen}；${state.enabled ? `统一用户名为 ${state.username}` : "认证已关闭"}`); void queryClient.invalidateQueries({ queryKey: ["events"] }); }} onClose={() => setSocksAuthOpen(false)} open={socksAuthOpen} />
       <ChangePasswordDialog onChanged={(updatedSession) => { onSessionChange(updatedSession); setPasswordOpen(false); setNotice("管理密码已修改，其他登录会话已失效"); void queryClient.invalidateQueries({ queryKey: ["events"] }); }} onClose={() => setPasswordOpen(false)} open={passwordOpen} />
     </div>
   );

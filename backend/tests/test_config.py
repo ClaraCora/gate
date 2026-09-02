@@ -16,6 +16,7 @@ def test_loads_project_example_config() -> None:
         "https://r.jina.ai/http://www.vpngate.net/api/iphone/",
     )
     assert settings.automation.health_interval_seconds == 120
+    assert settings.socks_auth.listen == "127.0.0.1"
     assert [region.socks_port for region in settings.regions[:5]] == [
         11081,
         11082,
@@ -54,6 +55,7 @@ def test_loads_socks_auth_from_separate_file_without_using_yaml(tmp_path: Path) 
     assert settings.socks_auth.enabled is True
     assert settings.socks_auth.username == "gate_user"
     assert settings.socks_auth.password == "strong!proxy#password"
+    assert settings.socks_auth.listen == "127.0.0.1"
 
 
 @pytest.mark.parametrize(
@@ -78,3 +80,8 @@ def test_accepts_eight_character_socks_password() -> None:
 def test_disabled_socks_auth_cannot_retain_credentials() -> None:
     with pytest.raises(ValidationError, match="must not retain"):
         SocksAuthConfig(enabled=False, username="gate_user", password="strong!proxy#password")
+
+
+def test_public_socks_listener_requires_authentication() -> None:
+    with pytest.raises(ValidationError, match="public SOCKS listening requires authentication"):
+        SocksAuthConfig(listen="0.0.0.0")

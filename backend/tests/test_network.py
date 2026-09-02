@@ -50,9 +50,13 @@ class FakeRunner(CommandRunner):
         if "ss" in command:
             return CommandResult(command, 0, "LISTEN 0 4096 10.253.0.2:1080 0.0.0.0:*", "")
         if command[:2] == ("systemctl", "is-active"):
-            active = command[2] in self.active_units
+            states = ["active" if unit in self.active_units else "inactive" for unit in command[2:]]
+            active = all(state == "active" for state in states)
             return CommandResult(
-                command, 0 if active else 3, "active\n" if active else "inactive\n", ""
+                command,
+                0 if active else 3,
+                "\n".join(states) + "\n",
+                "",
             )
         return CommandResult(command, 0, "", "")
 
@@ -153,10 +157,13 @@ async def test_provision_builds_kill_switch_and_tunnel_routes(
     assert spec.namespace not in runner.namespaces
     assert not (tmp_path / "state" / spec.namespace).exists()
 
+    runner.commands.clear()
     inventory = await manager.inspect()
     jp_a = next(item for item in inventory if item["region_id"] == "jp" and item["slot"] == "a")
     assert jp_a["exists"] is False
     assert jp_a["tunnel_up"] is False
+    assert sum(command == ("ip", "netns", "list") for command in runner.commands) == 1
+    assert sum(command[:2] == ("systemctl", "is-active") for command in runner.commands) == 1
 
 
 @pytest.mark.asyncio
@@ -232,6 +239,7 @@ async def test_socks_auth_rewrites_and_restarts_active_sing_box(
         "enabled": False,
         "username": "",
         "password": "",
+        "listen": "127.0.0.1",
     }
     assert ("systemctl", "restart", spec.socks_unit) in runner.commands
 
@@ -276,3 +284,44 @@ async def test_socks_auth_update_restores_file_config_and_runtime_on_failure(
     assert not auth_path.exists()
     restarts = [command for command in runner.commands if command[:2] == ("systemctl", "restart")]
     assert restarts[-1] == ("systemctl", "restart", spec.socks_unit)
+
+
+@pytest.mark.asyncio
+async def test_public_listener_rewrites_validates_and_reloads_haproxy(tmp_path: Path) -> None:
+    settings = load_settings().model_copy(
+        update={
+            "socks_auth": SocksAuthConfig(
+                enabled=True,
+                username="gate_user",
+                password="strong!proxy#password",
+            )
+        }
+    )
+    runner = FakeRunner()
+    auth_path = tmp_path / "etc" / "gate" / "socks-auth.json"
+    haproxy_path = tmp_path / "etc" / "haproxy" / "haproxy.cfg"
+    manager = LinuxNetworkManager(
+        settings,
+        runner,
+        _executables(),
+        state_root=tmp_path / "state",
+        netns_config_root=tmp_path / "netns",
+        socks_auth_path=auth_path,
+        haproxy_config_path=haproxy_path,
+    )
+
+    updated = await manager.update_socks_auth(
+        UpdateSocksAuthRequest(
+            action="update_socks_auth",
+            enabled=True,
+            username="gate_user",
+            password="strong!proxy#password",
+            listen="0.0.0.0",
+        )
+    )
+
+    assert updated.listen == "0.0.0.0"
+    assert "bind 0.0.0.0:11081" in haproxy_path.read_text(encoding="utf-8")
+    assert json.loads(auth_path.read_text(encoding="utf-8"))["listen"] == "0.0.0.0"
+    assert any(command[:3] == ("haproxy", "-c", "-f") for command in runner.commands)
+    assert ("systemctl", "reload-or-restart", "haproxy.service") in runner.commands
