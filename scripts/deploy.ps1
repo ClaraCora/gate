@@ -58,7 +58,12 @@ try {
 
     & scp $archivePath "${HostAlias}:/tmp/$archiveName"
     & scp (Join-Path $projectRoot "deploy/install-release.sh") "${HostAlias}:/tmp/gate-install-release.sh"
-    & ssh $HostAlias "chmod 0700 /tmp/gate-install-release.sh && /tmp/gate-install-release.sh /tmp/$archiveName $releaseId"
+    $remoteUid = (& ssh $HostAlias "id -u").Trim()
+    if ($LASTEXITCODE -ne 0 -or $remoteUid -notmatch '^\d+$') {
+        throw "Unable to determine remote SSH user identity"
+    }
+    $remoteInstall = if ($remoteUid -eq "0") { "/tmp/gate-install-release.sh" } else { "sudo /tmp/gate-install-release.sh" }
+    & ssh $HostAlias "chmod 0700 /tmp/gate-install-release.sh && $remoteInstall /tmp/$archiveName $releaseId"
     if ($LASTEXITCODE -ne 0) {
         throw "Remote Gate deployment failed"
     }
