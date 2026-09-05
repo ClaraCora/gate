@@ -80,8 +80,9 @@ async def test_failover_prefers_untried_candidates_before_resetting_failures(
     settings = load_settings().model_copy(
         update={
             "database": DatabaseConfig(url=f"sqlite+aiosqlite:///{tmp_path / 'failover.db'}"),
-            "automation": load_settings()
-            .automation.model_copy(update={"max_candidates_per_cycle": 1}),
+            "automation": load_settings().automation.model_copy(
+                update={"max_candidates_per_cycle": 1}
+            ),
         }
     )
     database = Database(settings.database.url)
