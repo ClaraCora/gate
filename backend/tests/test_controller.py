@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from gate.config import DatabaseConfig, SelectionConfig, SocksAuthConfig, load_settings
 from gate.controller import AutomationController
+from gate.coordinator import SwitchError
 from gate.database import Database
 from gate.discovery import DiscoveryService
 from gate.domain import FeedParseResult, RegionMode, RegionStatus, VpnGateNode
@@ -16,11 +17,14 @@ from gate.profiles import sanitize_openvpn_profile
 
 
 class FakeCoordinator:
-    def __init__(self) -> None:
+    def __init__(self, failing_nodes: set[int] | None = None) -> None:
         self.switches: list[tuple[str, int]] = []
+        self.failing_nodes = failing_nodes or set()
 
     async def switch(self, region_id: str, node_id: int) -> object:
         self.switches.append((region_id, node_id))
+        if node_id in self.failing_nodes:
+            raise SwitchError("simulated switch failure")
         return object()
 
     async def probe_candidate(self, region_id: str, node_id: int) -> object:
@@ -66,6 +70,80 @@ async def test_discovery_cycle_attempts_current_candidate_for_unavailable_region
 
     candidate = (await database.list_candidates("jp"))[0]
     assert coordinator.switches == [("jp", candidate.id)]
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_failover_prefers_untried_candidates_before_resetting_failures(
+    tmp_path: Path, encoded_profile: str
+) -> None:
+    settings = load_settings().model_copy(
+        update={
+            "database": DatabaseConfig(url=f"sqlite+aiosqlite:///{tmp_path / 'failover.db'}"),
+            "automation": load_settings()
+            .automation.model_copy(update={"max_candidates_per_cycle": 1}),
+        }
+    )
+    database = Database(settings.database.url)
+    await database.initialize(settings.regions)
+    second_profile_b64 = base64.b64encode(
+        base64.b64decode(encoded_profile).replace(b" 1195", b" 1196")
+    ).decode()
+
+    def node(hostname: str, score: int, profile: str) -> VpnGateNode:
+        return VpnGateNode(
+            hostname=hostname,
+            ip="128.211.249.131",
+            country_long="Japan",
+            country_code="JP",
+            score=score,
+            ping_ms=12,
+            speed_bps=100_000_000,
+            sessions=2,
+            uptime_ms=86_400_000,
+            total_users=1,
+            total_traffic_bytes=1,
+            log_type="2weeks",
+            operator="Test",
+            message="",
+            openvpn_config_base64=profile,
+        )
+
+    first = sanitize_openvpn_profile(encoded_profile, expected_ip="128.211.249.131")
+    second = sanitize_openvpn_profile(second_profile_b64, expected_ip="128.211.249.131")
+    await database.ingest_nodes(
+        [
+            (node("first", 200, encoded_profile), first),
+            (node("second", 100, second_profile_b64), second),
+        ],
+        datetime.now(UTC),
+    )
+    discovery = DiscoveryService(database, feed_url="unused")
+    discovery.profiles[first.fingerprint] = first
+    discovery.profiles[second.fingerprint] = second
+    candidates = await database.list_candidates("jp")
+    first_id = next(item.id for item in candidates if item.fingerprint == first.fingerprint)
+    second_id = next(item.id for item in candidates if item.fingerprint == second.fingerprint)
+    coordinator = FakeCoordinator({first_id, second_id})
+    controller = AutomationController(settings, database, discovery, coordinator)
+    region = await database.get_region("jp")
+    assert region is not None
+
+    await controller._attempt_region(region)
+    assert len(coordinator.switches) == 1
+    first_attempt = coordinator.switches[0][1]
+    assert first_attempt in {first_id, second_id}
+    assert await database.list_switch_failure_nodes("jp") == {first_attempt}
+
+    await controller._attempt_region(region)
+    assert len(coordinator.switches) == 2
+    second_attempt = coordinator.switches[1][1]
+    assert second_attempt in {first_id, second_id} - {first_attempt}
+    assert await database.list_switch_failure_nodes("jp") == set()
+
+    await controller._attempt_region(region)
+    assert len(coordinator.switches) == 3
+    assert coordinator.switches[2][1] in {first_id, second_id}
     await database.close()
 
 

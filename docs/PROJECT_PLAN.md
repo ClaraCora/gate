@@ -536,7 +536,7 @@ selection:
 automation:
   enabled: true
   health_interval_seconds: 120
-  max_candidates_per_cycle: 3
+  max_candidates_per_cycle: 5
 
 regions:
   - id: jp

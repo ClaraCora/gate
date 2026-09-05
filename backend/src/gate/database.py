@@ -187,6 +187,18 @@ class RegionSelectionRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class RegionSwitchFailureRecord(Base):
+    __tablename__ = "region_switch_failures"
+
+    region_id: Mapped[str] = mapped_column(
+        ForeignKey("regions.id", ondelete="CASCADE"), primary_key=True
+    )
+    node_id: Mapped[int] = mapped_column(
+        ForeignKey("nodes.id", ondelete="CASCADE"), primary_key=True
+    )
+    last_failed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class SecurityStateRecord(Base):
     __tablename__ = "security_state"
 
@@ -661,6 +673,11 @@ class Database:
             selection.confirmation_rounds = 0
             selection.last_switch_at = utc_now()
             selection.updated_at = utc_now()
+            await session.execute(
+                delete(RegionSwitchFailureRecord).where(
+                    RegionSwitchFailureRecord.region_id == region_id
+                )
+            )
 
     async def mark_slot_empty(self, region_id: str, slot: str) -> None:
         async with self.sessions() as session, session.begin():
@@ -871,6 +888,31 @@ class Database:
                 record.confirmation_rounds = 1
             record.updated_at = utc_now()
             return record.confirmation_rounds
+
+    async def record_switch_failure(self, region_id: str, node_id: int) -> None:
+        async with self.sessions() as session, session.begin():
+            record = await session.get(RegionSwitchFailureRecord, (region_id, node_id))
+            if record is None:
+                session.add(RegionSwitchFailureRecord(region_id=region_id, node_id=node_id))
+            else:
+                record.last_failed_at = utc_now()
+
+    async def list_switch_failure_nodes(self, region_id: str) -> set[int]:
+        async with self.sessions() as session:
+            node_ids = await session.scalars(
+                select(RegionSwitchFailureRecord.node_id).where(
+                    RegionSwitchFailureRecord.region_id == region_id
+                )
+            )
+            return set(node_ids)
+
+    async def reset_switch_failures(self, region_id: str) -> None:
+        async with self.sessions() as session, session.begin():
+            await session.execute(
+                delete(RegionSwitchFailureRecord).where(
+                    RegionSwitchFailureRecord.region_id == region_id
+                )
+            )
 
     async def reset_selection_candidate(self, region_id: str) -> None:
         async with self.sessions() as session, session.begin():

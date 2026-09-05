@@ -38,7 +38,7 @@ class AutomationConfig(BaseModel):
     enabled: bool = True
     health_interval_seconds: int = Field(default=120, ge=30, le=3600)
     optimization_interval_minutes: int = Field(default=30, ge=5, le=1440)
-    max_candidates_per_cycle: int = Field(default=3, ge=1, le=10)
+    max_candidates_per_cycle: int = Field(default=5, ge=1, le=5)
 
 
 class SecurityConfig(BaseModel):

@@ -17,5 +17,5 @@ def test_socks_proxy_url_encodes_credentials_and_ipv6_hosts() -> None:
             username="gate.user",
             password="p@ss:/?#[]!word",
         )
-        == "socks5://gate.user:p%40ss%3A%2F%3F%23%5B%5D%21word@[::1]:11081"
+        == "socks5h://gate.user:p%40ss%3A%2F%3F%23%5B%5D%21word@[::1]:11081"
     )

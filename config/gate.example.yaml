@@ -22,7 +22,7 @@ automation:
   enabled: true
   health_interval_seconds: 120
   optimization_interval_minutes: 30
-  max_candidates_per_cycle: 3
+  max_candidates_per_cycle: 5
 
 security:
   enabled: true

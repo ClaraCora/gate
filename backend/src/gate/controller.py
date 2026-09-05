@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 from collections.abc import Awaitable, Callable
 from datetime import UTC, timedelta
 from functools import partial
@@ -102,15 +103,42 @@ class AutomationController:
 
     async def _attempt_region(self, region: RegionRecord) -> bool:
         active = await self.database.get_active_slot(region.id)
-        candidates = await self.database.list_candidates(
-            region.id, self.settings.automation.max_candidates_per_cycle
-        )
+        candidates = await self.database.list_candidates(region.id)
+        failed_nodes = await self.database.list_switch_failure_nodes(region.id)
+        eligible = [
+            candidate
+            for candidate in candidates
+            if (active is None or candidate.id != active.node_id)
+            and candidate.fingerprint in self.discovery.profiles
+        ]
+        if not eligible:
+            await self.database.add_event(
+                code="AUTO_REGION_UNAVAILABLE",
+                level="error",
+                message=f"{region.name} 没有可用且不重复的自动候选节点",
+                region_id=region.id,
+                details={"attempted": 0},
+            )
+            return False
+
+        unfailed = [candidate for candidate in eligible if candidate.id not in failed_nodes]
+        if not unfailed:
+            # Every currently eligible candidate failed in the previous round. Start
+            # a new round, but leave this cycle untouched so failures are not retried.
+            await self.database.reset_switch_failures(region.id)
+            await self.database.add_event(
+                code="AUTO_REGION_UNAVAILABLE",
+                level="error",
+                message=f"{region.name} 的所有自动候选节点均已失败, 将在下一周期重试",
+                region_id=region.id,
+                details={"attempted": 0, "reset_failures": True},
+            )
+            return False
+
+        attempt_limit = self.settings.automation.max_candidates_per_cycle
+        selected = random.sample(unfailed, k=min(attempt_limit, len(unfailed)))
         attempted = 0
-        for candidate in candidates:
-            if active is not None and candidate.id == active.node_id:
-                continue
-            if candidate.fingerprint not in self.discovery.profiles:
-                continue
+        for candidate in selected:
             attempted += 1
             try:
                 await self._run_automatic_job(
@@ -119,25 +147,33 @@ class AutomationController:
                     node_id=candidate.id,
                     operation=partial(self.coordinator.switch, region.id, candidate.id),
                 )
-            except GateError as exc:
+            except Exception as exc:
+                failed_nodes.add(candidate.id)
+                await self.database.record_switch_failure(region.id, candidate.id)
+                error_code = exc.code if isinstance(exc, GateError) else "AUTOMATION_INTERNAL_ERROR"
                 await self.database.add_event(
                     code="AUTO_CANDIDATE_FAILED",
                     level="warning",
                     message=f"{region.name} 的自动候选节点切换失败",
                     region_id=region.id,
                     node_id=candidate.id,
-                    details={"error_code": exc.code, "message": str(exc)},
+                    details={"error_code": error_code, "message": str(exc)},
                 )
                 continue
             self.failure_counts[region.id] = 0
             return True
 
+        if all(candidate.id in failed_nodes for candidate in eligible):
+            await self.database.reset_switch_failures(region.id)
         await self.database.add_event(
             code="AUTO_REGION_UNAVAILABLE",
             level="error",
             message=f"{region.name} 没有可用且不重复的自动候选节点",
             region_id=region.id,
-            details={"attempted": attempted},
+            details={
+                "attempted": attempted,
+                "reset_failures": all(candidate.id in failed_nodes for candidate in eligible),
+            },
         )
         return False
 

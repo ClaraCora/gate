@@ -40,7 +40,9 @@ def socks_proxy_url(
     credentials = ""
     if username is not None:
         credentials = f"{quote(username, safe='')}:{quote(password or '', safe='')}@"
-    return f"socks5://{credentials}{authority}:{port}"
+    # Use remote DNS resolution so the panel probe follows the same path as
+    # real SOCKS5 clients and does not depend on VPS-side DNS reachability.
+    return f"socks5h://{credentials}{authority}:{port}"
 
 
 async def probe_socks_exit(
@@ -59,6 +61,7 @@ async def probe_socks_exit(
             proxy=proxy,
             timeout=httpx.Timeout(timeout_seconds, connect=timeout_seconds),
             follow_redirects=False,
+            trust_env=False,
         ) as client:
             trace_response = await client.get("https://www.cloudflare.com/cdn-cgi/trace")
             trace_response.raise_for_status()
