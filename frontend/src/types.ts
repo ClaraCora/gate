@@ -48,6 +48,11 @@ export interface Region {
   active_egress_ip: string | null;
   candidate_count: number;
   updated_at: string;
+  standby_state?: "switching" | "draining" | null;
+  standby_node_id?: number | null;
+  standby_egress_ip?: string | null;
+  conflict_region_name?: string | null;
+  conflict_reason?: string | null;
 }
 
 export interface HealthCheck {

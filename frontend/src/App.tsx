@@ -307,12 +307,13 @@ function PortRail({
   );
 }
 
-function SlotPair({ slots, unavailable = false }: { slots: RuntimeSlot[]; unavailable?: boolean }) {
+function SlotPair({ slots, unavailable = false, standbyState }: { slots: RuntimeSlot[]; unavailable?: boolean; standbyState?: Region["standby_state"] }) {
   if (unavailable) {
     return <div className="slot-pair slot-pair--offline"><ShieldOff size={13} /><span>状态不可读</span></div>;
   }
   return (
-    <div className="slot-pair" aria-label="A/B 运行槽">
+    <div className="slot-pair" aria-label="活动与备用运行槽">
+      <span className="slot-pair__summary">{standbyState === "switching" ? "备用：切换中" : standbyState === "draining" ? "旧线路：排空中" : "备用：空闲"}</span>
       {(["a", "b"] as const).map((name) => {
         const slot = slots.find((item) => item.slot === name);
         const ready = Boolean(slot?.tunnel_up && slot?.socks_active);
@@ -482,7 +483,7 @@ export function RegionTable({
       <table className="region-table">
         <thead>
           <tr>
-            <th>地区 / 端口</th><th>出口 IP</th><th>模式</th><th>线路状态</th><th><span className="health-column-heading">近 {healthHistory?.window_hours ?? 2} 小时<small>每格 5 分钟</small></span></th><th>A/B 数据面</th><th>候选</th><th>更新时间</th>
+            <th>地区 / 端口</th><th>当前出口</th><th>切换备用</th><th>模式</th><th>线路状态</th><th><span className="health-column-heading">近 {healthHistory?.window_hours ?? 2} 小时<small>每格 5 分钟</small></span></th><th>候选</th><th>更新时间</th>
           </tr>
         </thead>
         <tbody>
@@ -514,7 +515,12 @@ export function RegionTable({
                           <span>{listen}:{region.socks_port}</span>
                         </button>
                       </td>
-                      <td><span className={`egress-ip ${region.active_egress_ip ? "" : "egress-ip--empty"}`}>{region.active_egress_ip ?? "未分配"}</span></td>
+                      <td>
+                        <div className="metric-pair"><strong className={`egress-ip ${region.active_egress_ip ? "" : "egress-ip--empty"}`}>{region.active_egress_ip ?? "未分配"}</strong><span className={region.conflict_region_name ? "conflict-label" : undefined}>{region.conflict_region_name ? `冲突：${region.conflict_region_name}` : "活动出口"}</span></div>
+                      </td>
+                      <td>
+                        <div className="metric-pair"><strong className={region.standby_state ? "standby-label" : "egress-ip--empty"}>{region.standby_state ? region.standby_egress_ip ?? (region.standby_state === "draining" ? "旧线路" : "验证中") : "无备用占用"}</strong><span>{region.standby_state === "switching" ? "切换中" : region.standby_state === "draining" ? "排空中" : "冷备用"}</span></div>
+                      </td>
                       <td onClick={(event) => event.stopPropagation()}>
                         <RegionToggle
                           disabled={modePendingRegionId === region.id || Boolean(activeJob)}
@@ -537,7 +543,6 @@ export function RegionTable({
                           windowHours={healthHistory?.window_hours ?? 2}
                         />
                       </td>
-                      <td><SlotPair slots={slots.filter((slot) => slot.region_id === region.id)} unavailable={runtimeUnavailable} /></td>
                       <td><span className="numeric">{region.candidate_count}</span></td>
                       <td><time dateTime={region.updated_at}>{formatTime(region.updated_at)}</time></td>
                     </tr>
@@ -670,7 +675,7 @@ function RegionInspector({
         <div><dt>线路评分</dt><dd>{activeCandidate?.quality_score != null ? activeCandidate.quality_score.toFixed(1) : "--"}</dd></div>
         <div><dt>候选线路</dt><dd>{region.candidate_count}</dd></div>
       </dl>
-      <SlotPair slots={slots} unavailable={runtimeUnavailable} />
+      <SlotPair slots={slots} standbyState={region.standby_state} unavailable={runtimeUnavailable} />
       {activeJob ? (
         <div className="active-job" aria-live="polite">
           <div><LoaderCircle className="spin" size={16} /><span>{String(activeJob.detail.message ?? "任务执行中")}</span><strong>{Math.round(activeJob.progress * 100)}%</strong></div>
@@ -721,7 +726,7 @@ function CandidateTable({
     return (
       <div className="empty-state">
         <Radio size={24} /><strong>当前入口没有可用候选节点</strong>
-        <span>同地区其他入口已使用的节点不会重复显示。可刷新节点列表或暂时关闭此入口。</span>
+        <span>已自动隐藏同地区正在使用、切换中或出口 IP 冲突的线路。可刷新节点列表或暂时关闭此入口。</span>
       </div>
     );
   }
@@ -842,7 +847,7 @@ function CandidateDialog({
             {CANDIDATE_SORT_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
           </select>
         </label>
-        <span className="candidate-result-count">{visibleCandidates.length} / {candidates.length} 个节点</span>
+        <span className="candidate-result-count">{visibleCandidates.length} / {candidates.length} 个可选节点</span>
       </div>
       <div className="candidate-dialog__body">
         {loading ? <SkeletonRows count={7} /> : error ? (

@@ -163,9 +163,15 @@ class AutomationController:
 
     async def run_health_cycle(self) -> None:
         for region, _candidate_count in await self.database.list_regions():
-            if not region.enabled or region.status != RegionStatus.HEALTHY:
+            if not region.enabled or region.status not in {
+                RegionStatus.HEALTHY,
+                RegionStatus.DEGRADED,
+                RegionStatus.UNAVAILABLE,
+            }:
                 continue
             active = await self.database.get_active_slot(region.id)
+            if active is None or active.node_id is None:
+                continue
             started_at = utc_now()
             credentials: dict[str, str] = {}
             if self.settings.socks_auth.enabled:
@@ -217,18 +223,19 @@ class AutomationController:
                             details={"failure_count": failures},
                         )
             else:
-                if active is not None and active.node_id is not None:
-                    await self.database.record_probe(
-                        region_id=region.id,
-                        node_id=active.node_id,
-                        probe_type="active_health",
-                        result="succeeded",
-                        egress_ip=probe.egress_ip,
-                        country_code=probe.country_code,
-                        latency_ms=probe.latency_ms,
-                        started_at=started_at,
-                    )
-                    await self.database.set_active_egress_ip(region.id, probe.egress_ip)
+                await self.database.record_probe(
+                    region_id=region.id,
+                    node_id=active.node_id,
+                    probe_type="active_health",
+                    result="succeeded",
+                    egress_ip=probe.egress_ip,
+                    country_code=probe.country_code,
+                    latency_ms=probe.latency_ms,
+                    started_at=started_at,
+                )
+                await self.database.set_active_egress_ip(region.id, probe.egress_ip)
+                if region.status != RegionStatus.HEALTHY:
+                    await self.database.set_region_status(region.id, RegionStatus.HEALTHY)
                 self.failure_counts[region.id] = 0
 
     async def _optimize_region(self, region: RegionRecord) -> None:

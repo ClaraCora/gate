@@ -68,6 +68,11 @@ class RegionResponse(BaseModel):
     active_egress_ip: str | None
     candidate_count: int
     updated_at: datetime
+    standby_state: Literal["switching", "draining"] | None = None
+    standby_node_id: int | None = None
+    standby_egress_ip: str | None = None
+    conflict_region_name: str | None = None
+    conflict_reason: str | None = None
 
 
 class RegionModeRequest(BaseModel):

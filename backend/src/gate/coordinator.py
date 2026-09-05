@@ -289,10 +289,16 @@ class SwitchCoordinator:
         *,
         progress: ProgressCallable | None = None,
     ) -> CandidateProbeResult:
+        region = await self.database.get_region(region_id)
+        if region is None:
+            raise SwitchError(f"unknown region: {region_id}")
+        group_lock = self._group_locks.setdefault(region.group_id, asyncio.Lock())
         lock = self._region_locks.setdefault(region_id, asyncio.Lock())
+        if group_lock.locked():
+            raise SwitchError(f"同地区已有任务正在运行: {region.group_id}")
         if lock.locked():
             raise SwitchError(f"an operation is already running for region: {region_id}")
-        async with lock:
+        async with group_lock, lock:
             return await self._probe_candidate(region_id, node_id, progress=progress)
 
     async def _probe_candidate(
@@ -316,6 +322,7 @@ class SwitchCoordinator:
         await report(0.05, "正在准备隔离的候选隧道")
         try:
             await self._destroy_slot(region_id, target_slot)
+            await self.database.reserve_slot(region_id, target_slot, node_id)
             worker_data = await self.worker.request(
                 ProvisionSlotRequest(
                     action="provision_slot",
@@ -337,6 +344,14 @@ class SwitchCoordinator:
                 1080,
                 expected_countries=set(region.countries),
             )
+            conflict = await self.database.get_active_conflict(
+                region_id,
+                node_id=node_id,
+                egress_ip=probe.egress_ip,
+            )
+            if conflict is not None:
+                raise SwitchError(f"出口 {probe.egress_ip} 已被同地区入口 {conflict.name} 使用")
+            await self.database.set_slot_egress_ip(region_id, target_slot, probe.egress_ip)
             await self.database.record_probe(
                 region_id=region_id,
                 node_id=node_id,
@@ -429,6 +444,7 @@ class SwitchCoordinator:
         await report(0.05, "正在准备备用隧道")
         try:
             await self._destroy_slot(region_id, target_slot)
+            await self.database.reserve_slot(region_id, target_slot, node_id)
             worker_data = await self.worker.request(
                 ProvisionSlotRequest(
                     action="provision_slot",
@@ -450,6 +466,7 @@ class SwitchCoordinator:
                 1080,
                 expected_countries=set(region.countries),
             )
+            await self.database.set_slot_egress_ip(region_id, target_slot, direct_probe.egress_ip)
 
             conflict = await self.database.get_active_conflict(
                 region_id,

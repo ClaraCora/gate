@@ -518,6 +518,23 @@ async def test_sibling_entries_exclude_active_node_and_reject_duplicate_egress(
             sibling = (await client.get("/api/v1/regions/jp-02/candidates")).json()
 
             assert [item["id"] for item in sibling] == [japan[1]["id"]]
+            await database.reserve_slot("jp-02", "a", japan[1]["id"])
+            assert (await client.get("/api/v1/regions/jp/candidates")).json() == [japan[0]]
+            region_rows = (await client.get("/api/v1/regions")).json()
+            standby = next(item for item in region_rows if item["id"] == "jp-02")
+            assert standby["standby_state"] == "switching"
+            assert standby["standby_node_id"] == japan[1]["id"]
+            await database.mark_slot_empty("jp-02", "a")
+            await database.record_probe(
+                region_id="jp-02",
+                node_id=japan[1]["id"],
+                probe_type="candidate",
+                result="succeeded",
+                egress_ip="203.0.113.10",
+                country_code="JP",
+                latency_ms=40.0,
+            )
+            assert (await client.get("/api/v1/regions/jp-02/candidates")).json() == []
             with pytest.raises(ValueError, match="conflicts with sibling"):
                 await database.complete_switch(
                     "jp-02",

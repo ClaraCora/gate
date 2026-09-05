@@ -580,24 +580,37 @@ def create_app(
     @app.get("/api/v1/regions", response_model=list[RegionResponse])
     async def list_regions() -> list[RegionResponse]:
         records = await app_database.list_regions()
-        return [
-            RegionResponse(
-                id=region.id,
-                group_id=region.group_id,
-                name=region.name,
-                countries=region.countries,
-                socks_port=region.socks_port,
-                network_index=region.network_index,
-                enabled=region.enabled,
-                mode=region.mode,
-                status=region.status,
-                active_node_id=region.active_node_id,
-                active_egress_ip=region.active_egress_ip,
-                candidate_count=candidate_count,
-                updated_at=region.updated_at,
+        result: list[RegionResponse] = []
+        for region, candidate_count in records:
+            standby = await app_database.get_switching_slot(region.id)
+            conflict = await app_database.get_region_conflict(region.id)
+            result.append(
+                RegionResponse(
+                    id=region.id,
+                    group_id=region.group_id,
+                    name=region.name,
+                    countries=region.countries,
+                    socks_port=region.socks_port,
+                    network_index=region.network_index,
+                    enabled=region.enabled,
+                    mode=region.mode,
+                    status=region.status,
+                    active_node_id=region.active_node_id,
+                    active_egress_ip=region.active_egress_ip,
+                    candidate_count=candidate_count,
+                    updated_at=region.updated_at,
+                    standby_state=(
+                        cast(Literal["switching", "draining"], standby.state)
+                        if standby is not None
+                        else None
+                    ),
+                    standby_node_id=standby.node_id if standby is not None else None,
+                    standby_egress_ip=standby.egress_ip if standby is not None else None,
+                    conflict_region_name=conflict[0].name if conflict is not None else None,
+                    conflict_reason=conflict[1] if conflict is not None else None,
+                )
             )
-            for region, candidate_count in records
-        ]
+        return result
 
     @app.get("/api/v1/health-history", response_model=HealthHistoryResponse)
     async def health_history(

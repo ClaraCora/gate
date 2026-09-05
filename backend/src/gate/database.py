@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 from sqlalchemy import (
@@ -22,6 +22,7 @@ from sqlalchemy import (
     inspect,
     or_,
     select,
+    true,
 )
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -140,6 +141,7 @@ class RegionSlotRecord(Base):
     namespace_name: Mapped[str] = mapped_column(String(32))
     backend_address: Mapped[str] = mapped_column(String(45))
     state: Mapped[str] = mapped_column(String(24), default="empty")
+    egress_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_verified_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -230,6 +232,9 @@ class Database:
         for name, statement in additions.items():
             if name not in columns:
                 connection.exec_driver_sql(statement)
+        slot_columns = {column["name"] for column in inspector.get_columns("region_slots")}
+        if "egress_ip" not in slot_columns:
+            connection.exec_driver_sql("ALTER TABLE region_slots ADD COLUMN egress_ip VARCHAR(45)")
         connection.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_probe_runs_type_finished "
             "ON probe_runs (probe_type, finished_at)"
@@ -282,6 +287,7 @@ class Database:
                                 slot=slot_name,
                                 namespace_name=spec.namespace,
                                 backend_address=spec.namespace_ip,
+                                egress_ip=None,
                             )
                         )
                     else:
@@ -422,17 +428,18 @@ class Database:
             for region in regions:
                 candidate_count = 0
                 if latest_observation is not None:
-                    sibling_nodes = select(RegionRecord.active_node_id).where(
-                        RegionRecord.group_id == region.group_id,
-                        RegionRecord.id != region.id,
-                        RegionRecord.active_node_id.is_not(None),
-                    )
+                    excluded_ids = await self._candidate_exclusions(session, region)
+                    exclusion = NodeRecord.id.not_in(excluded_ids) if excluded_ids else true()
                     candidate_count = int(
                         await session.scalar(
                             select(func.count(NodeRecord.id)).where(
                                 NodeRecord.country_code.in_(region.countries),
                                 NodeRecord.last_seen_at == latest_observation,
-                                NodeRecord.id.not_in(sibling_nodes),
+                                exclusion,
+                                (
+                                    NodeRecord.blacklisted_until.is_(None)
+                                    | (NodeRecord.blacklisted_until <= utc_now())
+                                ),
                             )
                         )
                         or 0
@@ -459,32 +466,97 @@ class Database:
             region = await session.get(RegionRecord, region_id)
             if region is None:
                 return None
-            conflicts = [RegionRecord.active_node_id == node_id]
-            if egress_ip is not None:
-                conflicts.append(RegionRecord.active_egress_ip == egress_ip)
-            record: RegionRecord | None = await session.scalar(
-                select(RegionRecord).where(
-                    RegionRecord.group_id == region.group_id,
-                    RegionRecord.id != region_id,
-                    RegionRecord.enabled.is_(True),
-                    or_(*conflicts),
+            siblings = list(
+                await session.scalars(
+                    select(RegionRecord).where(
+                        RegionRecord.group_id == region.group_id,
+                        RegionRecord.id != region_id,
+                    )
                 )
             )
-            return record
+            sibling_ids = [item.id for item in siblings]
+            for sibling in siblings:
+                if sibling.active_node_id == node_id:
+                    return sibling
+                if egress_ip is not None and sibling.active_egress_ip == egress_ip:
+                    return sibling
+            if not sibling_ids:
+                return None
+            slots = list(
+                await session.scalars(
+                    select(RegionSlotRecord).where(
+                        RegionSlotRecord.region_id.in_(sibling_ids),
+                        RegionSlotRecord.state.in_(("active", "switching", "draining")),
+                    )
+                )
+            )
+            sibling_by_id = {item.id: item for item in siblings}
+            for slot in slots:
+                sibling_record = sibling_by_id.get(slot.region_id)
+                if sibling_record is None:
+                    continue
+                if slot.node_id == node_id:
+                    return sibling_record
+                if egress_ip is not None and slot.egress_ip == egress_ip:
+                    return sibling_record
+            return None
 
     async def get_active_slot(self, region_id: str) -> RegionSlotRecord | None:
         async with self.sessions() as session:
-            record: RegionSlotRecord | None = await session.scalar(
-                select(RegionSlotRecord).where(
-                    RegionSlotRecord.region_id == region_id,
-                    RegionSlotRecord.state == "active",
-                )
+            record = cast(
+                RegionSlotRecord | None,
+                await session.scalar(
+                    select(RegionSlotRecord).where(
+                        RegionSlotRecord.region_id == region_id,
+                        RegionSlotRecord.state == "active",
+                    )
+                ),
             )
             return record
 
     async def get_slot(self, region_id: str, slot: str) -> RegionSlotRecord | None:
         async with self.sessions() as session:
-            return await session.get(RegionSlotRecord, (region_id, slot))
+            return cast(
+                RegionSlotRecord | None,
+                await session.get(RegionSlotRecord, (region_id, slot)),
+            )
+
+    async def get_switching_slot(self, region_id: str) -> RegionSlotRecord | None:
+        async with self.sessions() as session:
+            switching = await session.scalar(
+                select(RegionSlotRecord).where(
+                    RegionSlotRecord.region_id == region_id,
+                    RegionSlotRecord.state == "switching",
+                )
+            )
+            if switching is not None:
+                return switching
+            return cast(
+                RegionSlotRecord | None,
+                await session.scalar(
+                    select(RegionSlotRecord).where(
+                        RegionSlotRecord.region_id == region_id,
+                        RegionSlotRecord.state == "draining",
+                    )
+                ),
+            )
+
+    async def get_region_conflict(self, region_id: str) -> tuple[RegionRecord, str] | None:
+        """Return a sibling entry that duplicates this entry's node or verified exit."""
+        region = await self.get_region(region_id)
+        if region is None:
+            return None
+        if region.active_node_id is None and region.active_egress_ip is None:
+            return None
+        conflict = await self.get_active_conflict(
+            region_id,
+            node_id=region.active_node_id if region.active_node_id is not None else -1,
+            egress_ip=region.active_egress_ip,
+        )
+        if conflict is None:
+            return None
+        reason = "出口 IP" if region.active_egress_ip is not None else "节点"
+        return conflict, reason
 
     async def list_slots(self) -> list[RegionSlotRecord]:
         async with self.sessions() as session:
@@ -542,20 +614,39 @@ class Database:
                 select(RegionRecord.id).where(
                     RegionRecord.group_id == region.group_id,
                     RegionRecord.id != region_id,
-                    RegionRecord.enabled.is_(True),
                     or_(*conflict_conditions),
                 )
             )
-            if conflict is not None:
-                raise ValueError(f"active exit conflicts with sibling entry: {conflict}")
+            slot_conflict_conditions = [RegionSlotRecord.node_id == node_id]
+            if egress_ip is not None:
+                slot_conflict_conditions.append(RegionSlotRecord.egress_ip == egress_ip)
+            slot_conflict = await session.scalar(
+                select(RegionSlotRecord.region_id).where(
+                    RegionSlotRecord.region_id != region_id,
+                    RegionSlotRecord.state.in_(("active", "switching", "draining")),
+                    or_(*slot_conflict_conditions),
+                    RegionSlotRecord.region_id.in_(
+                        select(RegionRecord.id).where(
+                            RegionRecord.group_id == region.group_id,
+                        )
+                    ),
+                )
+            )
+            if conflict is not None or slot_conflict is not None:
+                raise ValueError(
+                    f"active exit conflicts with sibling entry: {conflict or slot_conflict}"
+                )
             slots = await session.scalars(
                 select(RegionSlotRecord).where(RegionSlotRecord.region_id == region_id)
             )
             for record in slots:
                 if record.slot != slot and record.state == "active":
                     record.state = "draining"
+                    if record.egress_ip is None:
+                        record.egress_ip = region.active_egress_ip
             target.node_id = node_id
             target.state = "active"
+            target.egress_ip = egress_ip
             target.started_at = utc_now()
             target.last_verified_at = utc_now()
             region.active_node_id = node_id
@@ -578,6 +669,7 @@ class Database:
                 was_active = record.state == "active"
                 record.node_id = None
                 record.state = "empty"
+                record.egress_ip = None
                 record.started_at = None
                 record.last_verified_at = None
                 if was_active:
@@ -587,6 +679,66 @@ class Database:
                         region.active_egress_ip = None
                         region.status = RegionStatus.UNAVAILABLE
                         region.updated_at = utc_now()
+
+    async def reserve_slot(self, region_id: str, slot: str, node_id: int) -> None:
+        """Mark a non-active slot as a temporary standby during a switch/probe."""
+        async with self.sessions() as session, session.begin():
+            record = await session.get(RegionSlotRecord, (region_id, slot))
+            if record is None:
+                raise ValueError(f"unknown region slot: {region_id}/{slot}")
+            record.node_id = node_id
+            record.state = "switching"
+            record.egress_ip = None
+            record.started_at = utc_now()
+            record.last_verified_at = None
+
+    async def set_slot_egress_ip(self, region_id: str, slot: str, egress_ip: str) -> None:
+        async with self.sessions() as session, session.begin():
+            record = await session.get(RegionSlotRecord, (region_id, slot))
+            if record is None:
+                raise ValueError(f"unknown region slot: {region_id}/{slot}")
+            record.egress_ip = egress_ip
+            record.last_verified_at = utc_now()
+
+    async def _candidate_exclusions(self, session: Any, region: RegionRecord) -> set[int]:
+        siblings = list(
+            await session.scalars(
+                select(RegionRecord).where(
+                    RegionRecord.group_id == region.group_id,
+                    RegionRecord.id != region.id,
+                )
+            )
+        )
+        sibling_ids = [item.id for item in siblings]
+        if not sibling_ids:
+            return set()
+        reserved_nodes = {
+            node_id for node_id in (item.active_node_id for item in siblings) if node_id is not None
+        }
+        slots = list(
+            await session.scalars(
+                select(RegionSlotRecord).where(
+                    RegionSlotRecord.region_id.in_(sibling_ids),
+                    RegionSlotRecord.state.in_(("active", "switching", "draining")),
+                )
+            )
+        )
+        reserved_nodes.update(slot.node_id for slot in slots if slot.node_id is not None)
+        reserved_ips = {
+            item.active_egress_ip for item in siblings if item.active_egress_ip is not None
+        }
+        reserved_ips.update(slot.egress_ip for slot in slots if slot.egress_ip is not None)
+        if reserved_ips:
+            conflicting_nodes = await session.scalars(
+                select(ProbeRunRecord.node_id).where(
+                    ProbeRunRecord.probe_type == "candidate",
+                    ProbeRunRecord.result == "succeeded",
+                    ProbeRunRecord.egress_ip.in_(reserved_ips),
+                    ProbeRunRecord.finished_at >= utc_now() - timedelta(hours=24),
+                )
+            )
+            reserved_nodes.update(conflicting_nodes)
+        return reserved_nodes
 
     async def list_candidates(self, region_id: str, limit: int = 100) -> list[NodeRecord]:
         async with self.sessions() as session:
@@ -598,17 +750,17 @@ class Database:
             )
             if latest_observation is None:
                 return []
+            excluded_ids = await self._candidate_exclusions(session, region)
+            exclusion = NodeRecord.id.not_in(excluded_ids) if excluded_ids else true()
             statement = (
                 select(NodeRecord)
                 .where(
                     NodeRecord.country_code.in_(region.countries),
                     NodeRecord.last_seen_at == latest_observation,
-                    NodeRecord.id.not_in(
-                        select(RegionRecord.active_node_id).where(
-                            RegionRecord.group_id == region.group_id,
-                            RegionRecord.id != region_id,
-                            RegionRecord.active_node_id.is_not(None),
-                        )
+                    exclusion,
+                    (
+                        NodeRecord.blacklisted_until.is_(None)
+                        | (NodeRecord.blacklisted_until <= utc_now())
                     ),
                 )
                 .order_by(NodeRecord.api_score.desc(), NodeRecord.last_seen_at.desc())
