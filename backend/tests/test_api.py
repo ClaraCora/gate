@@ -240,11 +240,33 @@ async def test_telegram_status_provider_lists_exit_ip_success_rate_and_switch_bu
     async with app.router.lifespan_context(app):
         status_provider = app.state.telegram_bot.status_provider
         assert status_provider is not None
+        empty_message, _keyboard = await status_provider()
+        database = cast(Database, app.state.database)
+        await database.set_active_egress_ip("jp", "203.0.113.10")
         message, keyboard = await status_provider()
-    assert "日本 01 - 未分配 - 成功率 0/0" in message
+    assert empty_message.endswith("暂无已分配的出口")
+    assert "日本 01" not in empty_message
+    assert "日本 01 - 203.0.113.10 - 成功率 0/0" in message
+    assert "未分配" not in message
+    assert "韩国 01" not in message
+    assert "日本 02" not in message
     assert "最近 2 小时健康检查" in message
-    assert keyboard[0] == [{"text": "🔀 切换 日本 01", "callback_data": "switch:jp"}]
-    assert keyboard[-2] == [{"text": "🔄 刷新状态", "callback_data": "status:refresh"}]
+    assert [len(row) for row in keyboard] == [2, 2, 1, 2]
+    assert keyboard[0] == [
+        {"text": "🔀 切换 日本 01", "callback_data": "switch:jp"},
+        {"text": "🔀 切换 韩国 01", "callback_data": "switch:kr"},
+    ]
+    assert [button["callback_data"] for row in keyboard[:-1] for button in row] == [
+        "switch:jp",
+        "switch:kr",
+        "switch:na",
+        "switch:eu",
+        "switch:sea",
+    ]
+    assert keyboard[-1] == [
+        {"text": "🔄 刷新状态", "callback_data": "status:refresh"},
+        {"text": "⬅️ 返回菜单", "callback_data": "menu:home"},
+    ]
 
 
 @pytest.mark.asyncio

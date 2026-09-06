@@ -449,19 +449,27 @@ def create_app(
                 succeeded + (1 if check.result == "succeeded" else 0),
                 total + 1,
             )
-        lines = ["📡 Gate 出口状态", "最近 2 小时健康检查", ""]
-        keyboard: list[list[dict[str, str]]] = []
+        lines: list[str] = []
+        buttons: list[dict[str, str]] = []
         for region, _candidate_count in await app_database.list_regions():
-            active_ip = region.active_egress_ip or "未分配"
-            succeeded, total = totals.get(region.id, (0, 0))
-            lines.append(f"• {region.name} - {active_ip} - 成功率 {succeeded}/{total}")
-            if region.enabled and region.mode != "disabled":
-                keyboard.append(
-                    [{"text": f"🔀 切换 {region.name}", "callback_data": f"switch:{region.id}"}]
+            if region.active_egress_ip:
+                succeeded, total = totals.get(region.id, (0, 0))
+                lines.append(
+                    f"• {region.name} - {region.active_egress_ip} - 成功率 {succeeded}/{total}"
                 )
-        keyboard.append([{"text": "🔄 刷新状态", "callback_data": "status:refresh"}])
-        keyboard.append([{"text": "⬅️ 返回菜单", "callback_data": "menu:home"}])
-        return "\n".join(lines), keyboard
+            if region.enabled and region.mode != "disabled":
+                buttons.append(
+                    {"text": f"🔀 切换 {region.name}", "callback_data": f"switch:{region.id}"}
+                )
+        keyboard = [buttons[index : index + 2] for index in range(0, len(buttons), 2)]
+        keyboard.append(
+            [
+                {"text": "🔄 刷新状态", "callback_data": "status:refresh"},
+                {"text": "⬅️ 返回菜单", "callback_data": "menu:home"},
+            ]
+        )
+        body = "\n".join(lines) if lines else "暂无已分配的出口"
+        return f"📡 Gate 出口状态\n最近 2 小时健康检查\n\n{body}", keyboard
 
     async def telegram_region_name(region_id: str) -> str | None:
         region = await app_database.get_region(region_id)
