@@ -199,6 +199,17 @@ class RegionSwitchFailureRecord(Base):
     last_failed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class RegionSwitchFailureStateRecord(Base):
+    __tablename__ = "region_switch_failure_state"
+
+    region_id: Mapped[str] = mapped_column(
+        ForeignKey("regions.id", ondelete="CASCADE"), primary_key=True
+    )
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
+    intervention_notified: Mapped[bool] = mapped_column(Boolean, default=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class SecurityStateRecord(Base):
     __tablename__ = "security_state"
 
@@ -678,6 +689,11 @@ class Database:
                     RegionSwitchFailureRecord.region_id == region_id
                 )
             )
+            await session.execute(
+                delete(RegionSwitchFailureStateRecord).where(
+                    RegionSwitchFailureStateRecord.region_id == region_id
+                )
+            )
 
     async def mark_slot_empty(self, region_id: str, slot: str) -> None:
         async with self.sessions() as session, session.begin():
@@ -911,6 +927,42 @@ class Database:
             await session.execute(
                 delete(RegionSwitchFailureRecord).where(
                     RegionSwitchFailureRecord.region_id == region_id
+                )
+            )
+
+    async def record_switch_failure_attempt(self, region_id: str) -> tuple[int, bool]:
+        async with self.sessions() as session, session.begin():
+            record = await session.get(RegionSwitchFailureStateRecord, region_id)
+            if record is None:
+                record = RegionSwitchFailureStateRecord(
+                    region_id=region_id,
+                    consecutive_failures=1,
+                )
+                session.add(record)
+            else:
+                record.consecutive_failures += 1
+                record.updated_at = utc_now()
+            return record.consecutive_failures, record.intervention_notified
+
+    async def mark_switch_intervention_notified(self, region_id: str) -> None:
+        async with self.sessions() as session, session.begin():
+            record = await session.get(RegionSwitchFailureStateRecord, region_id)
+            if record is None:
+                record = RegionSwitchFailureStateRecord(
+                    region_id=region_id,
+                    consecutive_failures=0,
+                    intervention_notified=True,
+                )
+                session.add(record)
+            else:
+                record.intervention_notified = True
+                record.updated_at = utc_now()
+
+    async def reset_switch_failure_streak(self, region_id: str) -> None:
+        async with self.sessions() as session, session.begin():
+            await session.execute(
+                delete(RegionSwitchFailureStateRecord).where(
+                    RegionSwitchFailureStateRecord.region_id == region_id
                 )
             )
 

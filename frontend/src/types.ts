@@ -45,6 +45,7 @@ export interface Region {
   mode: RegionMode;
   status: RegionStatus;
   active_node_id: number | null;
+  active_node_ip?: string | null;
   active_egress_ip: string | null;
   candidate_count: number;
   updated_at: string;

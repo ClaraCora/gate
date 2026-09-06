@@ -22,6 +22,22 @@ Windows 只用于 SSH 访问和端口转发。除非明确说明，VPS 命令需
 | `gate-firewall.service` | 宿主转发和 NAT 规则 |
 | `haproxy.service` | 配置中全部固定 SOCKS5 入口 |
 
+Telegram 人工干预通知通过 `/etc/gate/config.yaml` 的 `telegram` 配置启用。建议把 bot
+token 和 chat id 放在 `/etc/gate/secrets.env`，避免写入普通配置文件：
+
+```sh
+printf '\nGATE_TELEGRAM_ENABLED=true\nGATE_TELEGRAM_BOT_TOKEN=<bot-token>\nGATE_TELEGRAM_CHAT_ID=<chat-id>\n' >> /etc/gate/secrets.env
+systemctl restart gate-api
+```
+
+连续 5 次自动切换失败后，Gate 会向该聊天发送一次人工干预通知；成功切换后计数清零，
+下一轮连续失败会重新触发通知。通知发送失败不会阻塞切换流程，事件会记录在 WebUI 的
+“事件”页和 `gate-api` 日志中。
+
+面板中的“当前节点 IP”是 VPN Gate 服务器的远端地址；“实际出口 IP”是该服务器访问公网时
+呈现的地址。两者经过 VPN 转发和出口 NAT 后通常不同，这是正常现象。Gate 只把后者作为
+出口验证结果，并用 Cloudflare trace 与 ipify 交叉核对。
+
 OpenVPN 和 sing-box 以 transient systemd unit 运行，命名分别为
 `gate-openvpn-<region>-<slot>.service` 和 `gate-socks-<region>-<slot>.service`。network
 namespace 命名为 `gate-<region>-<slot>`。

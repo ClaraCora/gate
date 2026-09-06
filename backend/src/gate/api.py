@@ -46,6 +46,7 @@ from gate.schemas import (
 )
 from gate.scoring import calculate_quality
 from gate.security import SESSION_COOKIE, SessionError, SessionManager
+from gate.telegram import TelegramNotifier
 from gate.worker_client import WorkerClient
 from gate.worker_protocol import HealthRequest, InspectRequest, UpdateSocksAuthRequest
 from gate.worker_protocol import Request as WorkerRequest
@@ -99,6 +100,7 @@ def create_app(
         app_database,
         app_discovery,
         app_coordinator,
+        notifier=TelegramNotifier(app_settings.telegram),
     )
     app_sessions = SessionManager(
         app_settings.security,
@@ -584,6 +586,11 @@ def create_app(
         for region, candidate_count in records:
             standby = await app_database.get_switching_slot(region.id)
             conflict = await app_database.get_region_conflict(region.id)
+            active_node = (
+                await app_database.get_node(region.active_node_id)
+                if region.active_node_id is not None
+                else None
+            )
             result.append(
                 RegionResponse(
                     id=region.id,
@@ -596,6 +603,7 @@ def create_app(
                     mode=region.mode,
                     status=region.status,
                     active_node_id=region.active_node_id,
+                    active_node_ip=active_node.ip if active_node is not None else None,
                     active_egress_ip=region.active_egress_ip,
                     candidate_count=candidate_count,
                     updated_at=region.updated_at,
@@ -846,6 +854,11 @@ def create_app(
         await app_coordinator.set_region_mode(region_id, RegionMode(payload.mode))
         records = await app_database.list_regions()
         updated, candidate_count = next(item for item in records if item[0].id == region_id)
+        active_node = (
+            await app_database.get_node(updated.active_node_id)
+            if updated.active_node_id is not None
+            else None
+        )
         return RegionResponse(
             id=updated.id,
             group_id=updated.group_id,
@@ -857,6 +870,7 @@ def create_app(
             mode=updated.mode,
             status=updated.status,
             active_node_id=updated.active_node_id,
+            active_node_ip=active_node.ip if active_node is not None else None,
             active_egress_ip=updated.active_egress_ip,
             candidate_count=candidate_count,
             updated_at=updated.updated_at,

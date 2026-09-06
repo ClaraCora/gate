@@ -1399,15 +1399,8 @@ td {
   background: #0f172a;
   color: #ffffff;
   border-color: #0f172a;
-  cursor: pointer;
-  transition: all 160ms ease-out;
+  transition: background 160ms ease-out, box-shadow 160ms ease-out;
   box-shadow: var(--shadow-xs);
-}
-
-.route-endpoint--exit:hover {
-  background: #1e293b;
-  box-shadow: var(--shadow-md);
-  transform: translateY(-1px);
 }
 
 .route-endpoint--exit span {

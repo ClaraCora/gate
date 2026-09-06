@@ -37,6 +37,18 @@ def test_rejects_duplicate_socks_ports() -> None:
         GateSettings.model_validate(raw)
 
 
+def test_loads_telegram_credentials_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GATE_TELEGRAM_ENABLED", "true")
+    monkeypatch.setenv("GATE_TELEGRAM_BOT_TOKEN", "token")
+    monkeypatch.setenv("GATE_TELEGRAM_CHAT_ID", "chat")
+
+    settings = load_settings()
+
+    assert settings.telegram.enabled is True
+    assert settings.telegram.bot_token == "token"
+    assert settings.telegram.chat_id == "chat"
+
+
 def test_loads_socks_auth_from_separate_file_without_using_yaml(tmp_path: Path) -> None:
     auth_path = tmp_path / "socks-auth.json"
     auth_path.write_text(

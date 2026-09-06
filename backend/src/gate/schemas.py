@@ -65,6 +65,7 @@ class RegionResponse(BaseModel):
     mode: str
     status: str
     active_node_id: int | None
+    active_node_ip: str | None
     active_egress_ip: str | None
     candidate_count: int
     updated_at: datetime

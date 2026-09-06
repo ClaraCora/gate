@@ -23,6 +23,10 @@ class SwitchGateway(Protocol):
     async def probe_candidate(self, region_id: str, node_id: int) -> object: ...
 
 
+class NotificationGateway(Protocol):
+    async def send(self, message: str) -> bool: ...
+
+
 ProbeCallable = Callable[..., Awaitable[EgressProbe]]
 
 
@@ -35,12 +39,14 @@ class AutomationController:
         coordinator: SwitchGateway | None = None,
         *,
         probe: ProbeCallable = probe_socks_exit,
+        notifier: NotificationGateway | None = None,
     ) -> None:
         self.settings = settings
         self.database = database
         self.discovery = discovery
         self.coordinator = coordinator or SwitchCoordinator(database, discovery)
         self.probe = probe
+        self.notifier = notifier
         self.failure_counts: dict[str, int] = {}
         self._enabled = settings.automation.enabled
         self._enabled_event = asyncio.Event()
@@ -101,6 +107,60 @@ class AutomationController:
         )
         return result
 
+    async def _record_automatic_switch_failure(
+        self,
+        region: RegionRecord,
+        node_id: int,
+        exc: Exception,
+        *,
+        event_code: str = "AUTO_CANDIDATE_FAILED",
+        event_message: str | None = None,
+    ) -> None:
+        await self.database.record_switch_failure(region.id, node_id)
+        failure_streak, intervention_notified = await self.database.record_switch_failure_attempt(
+            region.id
+        )
+        error_code = exc.code if isinstance(exc, GateError) else "AUTOMATION_INTERNAL_ERROR"
+        await self.database.add_event(
+            code=event_code,
+            level="warning",
+            message=event_message or f"{region.name} 的自动候选节点切换失败",
+            region_id=region.id,
+            node_id=node_id,
+            details={"error_code": error_code, "message": str(exc)},
+        )
+        if failure_streak < 5 or intervention_notified or self.notifier is None:
+            return
+        message = (
+            "Gate 需要人工干预\n"
+            f"入口: {region.name} ({region.id})\n"
+            f"连续自动切换失败: {failure_streak} 次\n"
+            f"当前节点 ID: {region.active_node_id or '--'}\n"
+            f"当前实际出口: {region.active_egress_ip or '--'}\n"
+            "请检查 VPN 隧道、出口探测和候选线路。"
+        )
+        try:
+            sent = await self.notifier.send(message)
+        except Exception as notify_exc:
+            await self.database.add_event(
+                code="TELEGRAM_NOTIFICATION_FAILED",
+                level="error",
+                message=f"{region.name} 的 Telegram 人工干预通知发送失败",
+                region_id=region.id,
+                node_id=node_id,
+                details={"error": str(notify_exc)},
+            )
+        else:
+            if sent:
+                await self.database.mark_switch_intervention_notified(region.id)
+                await self.database.add_event(
+                    code="TELEGRAM_INTERVENTION_NOTIFIED",
+                    message=f"{region.name} 连续自动切换失败, 已推送人工干预通知",
+                    region_id=region.id,
+                    node_id=node_id,
+                    details={"failure_streak": failure_streak},
+                )
+
     async def _attempt_region(self, region: RegionRecord) -> bool:
         active = await self.database.get_active_slot(region.id)
         candidates = await self.database.list_candidates(region.id)
@@ -149,18 +209,10 @@ class AutomationController:
                 )
             except Exception as exc:
                 failed_nodes.add(candidate.id)
-                await self.database.record_switch_failure(region.id, candidate.id)
-                error_code = exc.code if isinstance(exc, GateError) else "AUTOMATION_INTERNAL_ERROR"
-                await self.database.add_event(
-                    code="AUTO_CANDIDATE_FAILED",
-                    level="warning",
-                    message=f"{region.name} 的自动候选节点切换失败",
-                    region_id=region.id,
-                    node_id=candidate.id,
-                    details={"error_code": error_code, "message": str(exc)},
-                )
+                await self._record_automatic_switch_failure(region, candidate.id, exc)
                 continue
             self.failure_counts[region.id] = 0
+            await self.database.reset_switch_failure_streak(region.id)
             return True
 
         if all(candidate.id in failed_nodes for candidate in eligible):
@@ -359,16 +411,16 @@ class AutomationController:
                 node_id=best_node_id,
                 operation=lambda: self.coordinator.switch(region.id, best_node_id),
             )
-        except GateError as exc:
-            await self.database.add_event(
-                code="AUTO_OPTIMIZATION_FAILED",
-                level="warning",
-                message=f"{region.name} 的线路质量优化失败",
-                region_id=region.id,
-                node_id=best_node_id,
-                details={"error_code": exc.code, "message": str(exc)},
+        except Exception as exc:
+            await self._record_automatic_switch_failure(
+                region,
+                best_node_id,
+                exc,
+                event_code="AUTO_OPTIMIZATION_FAILED",
+                event_message=f"{region.name} 的线路质量优化失败",
             )
             return
+        await self.database.reset_switch_failure_streak(region.id)
         await self.database.add_event(
             code="AUTO_QUALITY_SWITCH",
             message=f"{region.name} 已自动切换到实测质量更高的出口",

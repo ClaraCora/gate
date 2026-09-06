@@ -32,6 +32,15 @@ class FakeCoordinator:
         return object()
 
 
+class FakeNotifier:
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    async def send(self, message: str) -> bool:
+        self.messages.append(message)
+        return True
+
+
 @pytest.mark.asyncio
 async def test_discovery_cycle_attempts_current_candidate_for_unavailable_region(
     tmp_path: Path, encoded_profile: str
@@ -126,7 +135,8 @@ async def test_failover_prefers_untried_candidates_before_resetting_failures(
     first_id = next(item.id for item in candidates if item.fingerprint == first.fingerprint)
     second_id = next(item.id for item in candidates if item.fingerprint == second.fingerprint)
     coordinator = FakeCoordinator({first_id, second_id})
-    controller = AutomationController(settings, database, discovery, coordinator)
+    notifier = FakeNotifier()
+    controller = AutomationController(settings, database, discovery, coordinator, notifier=notifier)
     region = await database.get_region("jp")
     assert region is not None
 
@@ -145,6 +155,11 @@ async def test_failover_prefers_untried_candidates_before_resetting_failures(
     await controller._attempt_region(region)
     assert len(coordinator.switches) == 3
     assert coordinator.switches[2][1] in {first_id, second_id}
+
+    for _ in range(3):
+        await controller._attempt_region(region)
+    assert len(notifier.messages) == 1
+    assert "连续自动切换失败: 5 次" in notifier.messages[0]
     await database.close()
 
 

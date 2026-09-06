@@ -478,6 +478,7 @@ async def test_candidate_api_keeps_stale_active_node_visible(
 
     japan = next(region for region in regions.json() if region["id"] == "jp")
     assert japan["candidate_count"] == 1
+    assert japan["active_node_ip"] == "128.211.249.131"
     assert [candidate["port"] for candidate in candidates.json()] == [1195, 1196]
     assert candidates.json()[0]["id"] == active["id"]
 

@@ -24,6 +24,8 @@ const EVENT_TITLES: Record<string, string> = {
   SOCKS_AUTH_UPDATED: "SOCKS 接入设置已更新",
   SWITCH_COMPLETED: "线路切换完成",
   SWITCH_ROLLED_BACK: "线路切换已回退",
+  TELEGRAM_INTERVENTION_NOTIFIED: "人工干预通知已发送",
+  TELEGRAM_NOTIFICATION_FAILED: "人工干预通知发送失败",
 };
 
 const EVENT_FALLBACKS: Record<string, string> = {
@@ -50,6 +52,8 @@ const EVENT_FALLBACKS: Record<string, string> = {
   SOCKS_AUTH_UPDATED: "所有 SOCKS 入口已应用新的监听和统一认证设置。",
   SWITCH_COMPLETED: "新出口已通过验证, 固定端口已完成切换。",
   SWITCH_ROLLED_BACK: "新出口未通过验证, 固定端口已恢复原线路。",
+  TELEGRAM_INTERVENTION_NOTIFIED: "连续自动切换失败，Telegram 已通知人工处理。",
+  TELEGRAM_NOTIFICATION_FAILED: "连续自动切换失败，但 Telegram 通知发送失败，请查看服务日志。",
 };
 
 const LEVEL_LABELS: Record<string, string> = {

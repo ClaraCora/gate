@@ -41,6 +41,20 @@ class AutomationConfig(BaseModel):
     max_candidates_per_cycle: int = Field(default=5, ge=1, le=5)
 
 
+class TelegramConfig(BaseModel):
+    enabled: bool = False
+    bot_token: str = ""
+    chat_id: str = ""
+    api_base_url: str = "https://api.telegram.org"
+    timeout_seconds: float = Field(default=10.0, ge=1.0, le=60.0)
+
+    @model_validator(mode="after")
+    def validate_credentials(self) -> TelegramConfig:
+        if self.enabled and (not self.bot_token.strip() or not self.chat_id.strip()):
+            raise ValueError("enabled Telegram notifications require bot_token and chat_id")
+        return self
+
+
 class SecurityConfig(BaseModel):
     enabled: bool = True
     session_hours: int = Field(default=12, ge=1, le=168)
@@ -137,6 +151,7 @@ class GateSettings(BaseModel):
     discovery: DiscoveryConfig = DiscoveryConfig()
     selection: SelectionConfig = SelectionConfig()
     automation: AutomationConfig = AutomationConfig()
+    telegram: TelegramConfig = TelegramConfig()
     security: SecurityConfig = SecurityConfig()
     socks_auth: SocksAuthConfig = SocksAuthConfig()
     retention: RetentionConfig = RetentionConfig()
@@ -205,4 +220,19 @@ def load_settings(
         if not isinstance(security, dict):
             raise ValueError("security config must be a mapping")
         security["enabled"] = normalized in {"1", "true"}
+    telegram = raw.setdefault("telegram", {})
+    if not isinstance(telegram, dict):
+        raise ValueError("telegram config must be a mapping")
+    telegram_token = os.environ.get("GATE_TELEGRAM_BOT_TOKEN")
+    telegram_chat_id = os.environ.get("GATE_TELEGRAM_CHAT_ID")
+    if telegram_token is not None:
+        telegram["bot_token"] = telegram_token
+    if telegram_chat_id is not None:
+        telegram["chat_id"] = telegram_chat_id
+    telegram_enabled = os.environ.get("GATE_TELEGRAM_ENABLED")
+    if telegram_enabled is not None:
+        normalized = telegram_enabled.strip().lower()
+        if normalized not in {"0", "1", "false", "true"}:
+            raise ValueError("GATE_TELEGRAM_ENABLED must be true or false")
+        telegram["enabled"] = normalized in {"1", "true"}
     return GateSettings.model_validate(raw)
