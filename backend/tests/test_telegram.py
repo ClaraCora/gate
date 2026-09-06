@@ -114,4 +114,61 @@ async def test_telegram_bot_callback_queues_requested_region() -> None:
         }
     )
     assert answered == [{"callback_query_id": "callback-1"}]
-    assert sent == ["queued jp-02"]
+    assert sent == [
+        "确认切换到「jp-02」?\n\n系统将按排除机制随机尝试最多 5 个候选出口。"
+    ]
+
+    await bot.handle_update(
+        {
+            "callback_query": {
+                "id": "callback-2",
+                "data": "switch:confirm:jp-02",
+                "message": {"chat": {"id": 123}},
+            }
+        }
+    )
+    assert sent[-1] == "queued jp-02"
+
+
+@pytest.mark.asyncio
+async def test_telegram_bot_shortcuts_and_cancel_do_not_switch() -> None:
+    notifier = TelegramNotifier(TelegramConfig(enabled=True, bot_token="token", chat_id="chat"))
+    sent: list[tuple[str, dict[str, object] | None]] = []
+    switched: list[str] = []
+
+    async def send(message: str, *, reply_markup: dict[str, object] | None = None) -> bool:
+        sent.append((message, reply_markup))
+        return True
+
+    notifier.send = send  # type: ignore[method-assign]
+    bot = TelegramBot(notifier)
+
+    async def status() -> tuple[str, list[list[dict[str, str]]]]:
+        return "status", [[{"text": "🔀 切换 JP", "callback_data": "switch:jp"}]]
+
+    async def switch(region_id: str) -> str:
+        switched.append(region_id)
+        return "queued"
+
+    bot.set_handlers(status_provider=status, switch_handler=switch)
+    await bot.handle_update({"message": {"chat": {"id": "chat"}, "text": "/start"}})
+    assert sent[-1][1] is not None
+    assert sent[-1][1]["keyboard"][0][0]["text"] == "📊 查看状态"  # type: ignore[index]
+
+    await bot.handle_update({"message": {"chat": {"id": "chat"}, "text": "🔀 切换出口"}})
+    assert sent[-1] == (
+        "请选择要切换的入口:",
+        {"inline_keyboard": [[{"text": "🔀 切换 JP", "callback_data": "switch:jp"}]]},
+    )
+
+    await bot.handle_update(
+        {
+            "callback_query": {
+                "id": "callback-cancel",
+                "data": "switch:cancel",
+                "message": {"chat": {"id": "chat"}},
+            }
+        }
+    )
+    assert switched == []
+    assert sent[-1][0] == "已取消切换。"

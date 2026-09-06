@@ -439,7 +439,7 @@ def create_app(
     async def telegram_status() -> tuple[str, list[list[dict[str, str]]]]:
         now = utc_now()
         checks = await app_database.list_active_health_probes(
-            now - timedelta(hours=24),
+            now - timedelta(hours=2),
             now,
         )
         totals: dict[str, tuple[int, int]] = {}
@@ -449,17 +449,23 @@ def create_app(
                 succeeded + (1 if check.result == "succeeded" else 0),
                 total + 1,
             )
-        lines = ["Gate 出口状态 (近 24 小时)"]
+        lines = ["📡 Gate 出口状态", "最近 2 小时健康检查", ""]
         keyboard: list[list[dict[str, str]]] = []
         for region, _candidate_count in await app_database.list_regions():
             active_ip = region.active_egress_ip or "未分配"
             succeeded, total = totals.get(region.id, (0, 0))
-            lines.append(f"{region.name} - {active_ip} - 成功率 {succeeded}/{total}")
+            lines.append(f"• {region.name} - {active_ip} - 成功率 {succeeded}/{total}")
             if region.enabled and region.mode != "disabled":
                 keyboard.append(
-                    [{"text": f"切换 {region.name}", "callback_data": f"switch:{region.id}"}]
+                    [{"text": f"🔀 切换 {region.name}", "callback_data": f"switch:{region.id}"}]
                 )
+        keyboard.append([{"text": "🔄 刷新状态", "callback_data": "status:refresh"}])
+        keyboard.append([{"text": "⬅️ 返回菜单", "callback_data": "menu:home"}])
         return "\n".join(lines), keyboard
+
+    async def telegram_region_name(region_id: str) -> str | None:
+        region = await app_database.get_region(region_id)
+        return region.name if region is not None else None
 
     async def telegram_switch(region_id: str) -> str:
         region = await app_database.get_region(region_id)
@@ -474,6 +480,7 @@ def create_app(
     app_telegram_bot.set_handlers(
         status_provider=telegram_status,
         switch_handler=telegram_switch,
+        region_name_provider=telegram_region_name,
     )
 
     @app.get("/api/v1/meta", response_model=MetaResponse)

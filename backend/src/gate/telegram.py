@@ -69,6 +69,20 @@ class TelegramNotifier:
 
 StatusProvider = Callable[[], Awaitable[tuple[str, list[list[dict[str, str]]]]]]
 SwitchHandler = Callable[[str], Awaitable[str]]
+RegionNameProvider = Callable[[str], Awaitable[str | None]]
+
+
+def _operator_keyboard() -> dict[str, Any]:
+    """Persistent shortcuts shown below the Telegram compose box."""
+    return {
+        "keyboard": [
+            [{"text": "📊 查看状态"}, {"text": "🔀 切换出口"}],
+            [{"text": "💡 使用帮助"}],
+        ],
+        "resize_keyboard": True,
+        "is_persistent": True,
+        "input_field_placeholder": "选择操作或输入命令",
+    }
 
 
 class TelegramBot:
@@ -78,19 +92,39 @@ class TelegramBot:
         self.notifier = notifier
         self.status_provider: StatusProvider | None = None
         self.switch_handler: SwitchHandler | None = None
+        self.region_name_provider: RegionNameProvider | None = None
         self._offset = 0
+        self._commands_configured = False
 
     def set_handlers(
         self,
         *,
         status_provider: StatusProvider,
         switch_handler: SwitchHandler,
+        region_name_provider: RegionNameProvider | None = None,
     ) -> None:
         self.status_provider = status_provider
         self.switch_handler = switch_handler
+        self.region_name_provider = region_name_provider
 
     def reset_offset(self) -> None:
         self._offset = 0
+        self._commands_configured = False
+
+    async def _ensure_commands(self) -> None:
+        if self._commands_configured:
+            return
+        await self.notifier._request(
+            "setMyCommands",
+            {
+                "commands": [
+                    {"command": "status", "description": "查看出口状态"},
+                    {"command": "switch", "description": "确认后切换出口"},
+                    {"command": "help", "description": "打开操作菜单"},
+                ]
+            },
+        )
+        self._commands_configured = True
 
     async def run_forever(self) -> None:
         while True:
@@ -98,6 +132,7 @@ class TelegramBot:
                 await asyncio.sleep(5)
                 continue
             try:
+                await self._ensure_commands()
                 updates = await self.notifier._request(
                     "getUpdates",
                     {
@@ -148,27 +183,91 @@ class TelegramBot:
         data = callback.get("data")
         if isinstance(callback_id, str):
             await self._answer_callback(callback_id)
-        if not isinstance(data, str) or not data.startswith("switch:"):
+        if not isinstance(data, str):
+            return
+        if data == "status:refresh":
+            status_text, keyboard = await self.status_provider()
+            await self.notifier.send(status_text, reply_markup={"inline_keyboard": keyboard})
+            return
+        if data == "menu:home":
+            await self._send_help()
+            return
+        if data == "switch:cancel":
+            await self.notifier.send("已取消切换。", reply_markup=_operator_keyboard())
+            return
+        if data.startswith("switch:confirm:"):
+            region_id = data.removeprefix("switch:confirm:").strip()
+            if self._valid_region_id(region_id):
+                await self.notifier.send(
+                    await self.switch_handler(region_id),
+                    reply_markup=_operator_keyboard(),
+                )
+            return
+        if not data.startswith("switch:"):
             return
         region_id = data.removeprefix("switch:").strip()
-        if not region_id or not region_id.replace("-", "").isalnum():
+        if not self._valid_region_id(region_id):
             return
-        await self.notifier.send(await self.switch_handler(region_id))
+        await self._send_switch_confirmation(region_id)
+
+    @staticmethod
+    def _valid_region_id(region_id: str) -> bool:
+        return bool(region_id and region_id.replace("-", "").isalnum())
+
+    async def _region_name(self, region_id: str) -> str | None:
+        if self.region_name_provider is None:
+            return region_id
+        return await self.region_name_provider(region_id)
+
+    async def _send_switch_confirmation(self, region_id: str) -> None:
+        region_name = await self._region_name(region_id)
+        if region_name is None:
+            await self.notifier.send(
+                f"入口 {region_id} 不存在。",
+                reply_markup=_operator_keyboard(),
+            )
+            return
+        await self.notifier.send(
+            f"确认切换到「{region_name}」?\n\n系统将按排除机制随机尝试最多 5 个候选出口。",
+            reply_markup={
+                "inline_keyboard": [
+                    [
+                        {"text": "✅ 确认切换", "callback_data": f"switch:confirm:{region_id}"},
+                        {"text": "取消", "callback_data": "switch:cancel"},
+                    ],
+                    [{"text": "返回菜单", "callback_data": "menu:home"}],
+                ]
+            },
+        )
+
+    async def _send_help(self) -> None:
+        await self.notifier.send(
+            "🛠 Gate 出口助手\n\n"
+            "📊 查看状态: 查看最近 2 小时成功率和实际出口 IP\n"
+            "🔀 切换出口: 选择入口并确认后提交切换\n\n"
+            "命令:\n/status 查看状态\n/switch <入口ID> 请求切换\n/help 查看帮助",
+            reply_markup=_operator_keyboard(),
+        )
 
     async def _handle_command(self, text: str) -> None:
         if self.status_provider is None or self.switch_handler is None:
             return
         command, _, argument = text.strip().partition(" ")
         command = command.split("@", 1)[0].lower()
-        if command in {"/start", "/help"}:
-            await self.notifier.send(
-                "可用命令:\n/status 查看出口状态\n/switch <入口ID> 切换指定出口"
-            )
-        elif command == "/status":
+        if command in {"/start", "/help"} or text.strip() in {"💡 使用帮助", "帮助"}:
+            await self._send_help()
+        elif command == "/status" or text.strip() in {"📊 查看状态", "状态"}:
             status_text, keyboard = await self.status_provider()
             await self.notifier.send(status_text, reply_markup={"inline_keyboard": keyboard})
         elif command == "/switch" and argument.strip():
-            await self.notifier.send(await self.switch_handler(argument.strip()))
+            await self._send_switch_confirmation(argument.strip())
+        elif command == "/switch" or text.strip() in {"🔀 切换出口", "切换出口"}:
+            status_text, keyboard = await self.status_provider()
+            del status_text
+            await self.notifier.send(
+                "请选择要切换的入口:",
+                reply_markup={"inline_keyboard": keyboard},
+            )
 
     async def _answer_callback(self, callback_id: str) -> None:
         try:

@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import cast
 
@@ -241,7 +242,35 @@ async def test_telegram_status_provider_lists_exit_ip_success_rate_and_switch_bu
         assert status_provider is not None
         message, keyboard = await status_provider()
     assert "日本 01 - 未分配 - 成功率 0/0" in message
-    assert keyboard[0] == [{"text": "切换 日本 01", "callback_data": "switch:jp"}]
+    assert "最近 2 小时健康检查" in message
+    assert keyboard[0] == [{"text": "🔀 切换 日本 01", "callback_data": "switch:jp"}]
+    assert keyboard[-2] == [{"text": "🔄 刷新状态", "callback_data": "status:refresh"}]
+
+
+@pytest.mark.asyncio
+async def test_telegram_status_provider_uses_two_hour_window(tmp_path: Path) -> None:
+    app = create_app(
+        _settings(tmp_path / "telegram-status-window.db"),
+        reconcile_on_startup=False,
+        automation_on_startup=False,
+    )
+    captured: list[tuple[object, object]] = []
+
+    async with app.router.lifespan_context(app):
+        database = app.state.database
+
+        async def list_active_health_probes(since: object, until: object) -> list[object]:
+            captured.append((since, until))
+            return []
+
+        database.list_active_health_probes = list_active_health_probes  # type: ignore[method-assign]
+        status_provider = app.state.telegram_bot.status_provider
+        assert status_provider is not None
+        await status_provider()
+
+    assert len(captured) == 1
+    since, until = captured[0]
+    assert until - since == timedelta(hours=2)  # type: ignore[operator]
 
 
 @pytest.mark.asyncio
