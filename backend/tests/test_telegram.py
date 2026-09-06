@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import httpx
 import pytest
 from gate.config import TelegramConfig
@@ -24,7 +26,7 @@ async def test_telegram_notifier_posts_message(monkeypatch: pytest.MonkeyPatch) 
     )
 
     class Client(httpx.AsyncClient):
-        def __init__(self, **kwargs: object) -> None:
+        def __init__(self, **kwargs: Any) -> None:
             kwargs["transport"] = httpx.MockTransport(handler)
             super().__init__(**kwargs)
 
