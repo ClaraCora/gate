@@ -11,6 +11,8 @@ import type {
   SessionState,
   SocksAuthState,
   SocksAuthUpdate,
+  TelegramSettings,
+  TelegramSettingsUpdate,
 } from "./types";
 
 let csrfToken: string | null = null;
@@ -98,6 +100,12 @@ export const gateApi = {
       method: "PUT",
       body: JSON.stringify({ enabled }),
     }),
+  telegram: () => request<TelegramSettings>("/api/v1/telegram"),
+  updateTelegram: (update: TelegramSettingsUpdate) =>
+    request<TelegramSettings>("/api/v1/telegram", {
+      method: "PUT",
+      body: JSON.stringify(update),
+    }),
   regions: () => request<Region[]>("/api/v1/regions"),
   healthHistory: (hours = 2) =>
     request<HealthHistory>(`/api/v1/health-history?hours=${hours}`),
@@ -116,6 +124,8 @@ export const gateApi = {
     request<Job>(`/api/v1/regions/${regionId}/candidates/${nodeId}/probe`, {
       method: "POST",
     }),
+  switchRegion: (regionId: string) =>
+    request<Job>(`/api/v1/regions/${regionId}/switch`, { method: "POST" }),
   switchCandidate: (regionId: string, nodeId: number) =>
     request<Job>(`/api/v1/regions/${regionId}/candidates/${nodeId}/switch`, {
       method: "POST",

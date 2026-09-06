@@ -161,7 +161,7 @@ class AutomationController:
                     details={"failure_streak": failure_streak},
                 )
 
-    async def _attempt_region(self, region: RegionRecord) -> bool:
+    async def _attempt_region(self, region: RegionRecord, *, automatic: bool = True) -> bool:
         active = await self.database.get_active_slot(region.id)
         candidates = await self.database.list_candidates(region.id)
         failed_nodes = await self.database.list_switch_failure_nodes(region.id)
@@ -201,18 +201,26 @@ class AutomationController:
         for candidate in selected:
             attempted += 1
             try:
-                await self._run_automatic_job(
-                    kind="auto_switch",
-                    region_id=region.id,
-                    node_id=candidate.id,
-                    operation=partial(self.coordinator.switch, region.id, candidate.id),
-                )
+                operation = partial(self.coordinator.switch, region.id, candidate.id)
+                if automatic:
+                    await self._run_automatic_job(
+                        kind="auto_switch",
+                        region_id=region.id,
+                        node_id=candidate.id,
+                        operation=operation,
+                    )
+                else:
+                    await operation()
             except Exception as exc:
                 failed_nodes.add(candidate.id)
-                await self._record_automatic_switch_failure(region, candidate.id, exc)
+                if automatic:
+                    await self._record_automatic_switch_failure(region, candidate.id, exc)
+                else:
+                    await self.database.record_switch_failure(region.id, candidate.id)
                 continue
-            self.failure_counts[region.id] = 0
-            await self.database.reset_switch_failure_streak(region.id)
+            if automatic:
+                self.failure_counts[region.id] = 0
+                await self.database.reset_switch_failure_streak(region.id)
             return True
 
         if all(candidate.id in failed_nodes for candidate in eligible):
@@ -228,6 +236,13 @@ class AutomationController:
             },
         )
         return False
+
+    async def attempt_region(self, region_id: str, *, automatic: bool = False) -> bool:
+        """Run one on-demand failover cycle using the same exclusion rules as automation."""
+        region = await self.database.get_region(region_id)
+        if region is None:
+            return False
+        return await self._attempt_region(region, automatic=automatic)
 
     async def run_discovery_cycle(self) -> None:
         try:

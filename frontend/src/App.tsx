@@ -6,6 +6,7 @@ import {
 import {
   Activity,
   ArrowLeftRight,
+  BellRing,
   CircleAlert,
   CircleCheck,
   CircleOff,
@@ -31,6 +32,7 @@ import {
   X,
 } from "lucide-react";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import type { FormEvent } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { ApiError, gateApi, setCsrfToken } from "./api";
@@ -49,6 +51,7 @@ import type {
   SessionState,
   SocksListenAddress,
   SocksAuthState,
+  TelegramSettings,
 } from "./types";
 
 const REGION_LABELS: Record<string, string> = {
@@ -612,11 +615,13 @@ function RegionInspector({
   modePending,
   probePending,
   reconnectPending,
+  switchPending,
   runtimeUnavailable,
   onMode,
   onToggle,
   onProbe,
   onReconnect,
+  onSwitch,
   listen,
 }: {
   region: Region;
@@ -625,11 +630,13 @@ function RegionInspector({
   modePending: boolean;
   probePending: boolean;
   reconnectPending: boolean;
+  switchPending: boolean;
   runtimeUnavailable: boolean;
   onMode: (mode: RegionMode) => void;
   onToggle: () => void;
   onProbe: () => void;
   onReconnect: () => void;
+  onSwitch: () => void;
   listen: SocksListenAddress;
 }) {
   return (
@@ -674,6 +681,10 @@ function RegionInspector({
         </div>
         <ModeControl disabled={modePending || Boolean(activeJob) || region.mode === "disabled"} onChange={onMode} value={region.mode} />
         <div className="inspector__actions">
+          <button className="button button--primary" disabled={switchPending || !region.enabled || region.mode === "disabled" || Boolean(activeJob)} onClick={onSwitch} type="button">
+            {switchPending ? <LoaderCircle className="spin" size={16} /> : <ArrowLeftRight size={16} />}
+            {switchPending ? "提交中" : "切换出口"}
+          </button>
           <button className="button button--primary" disabled={probePending || !["healthy", "degraded"].includes(region.status) || Boolean(activeJob)} onClick={onProbe} type="button">
             {probePending ? <LoaderCircle className="spin" size={16} /> : <Gauge size={16} />}
             {probePending ? "提交中" : "测试出口"}
@@ -1021,6 +1032,117 @@ export function SocksAuthDialog({
   );
 }
 
+export function TelegramSettingsDialog({
+  open,
+  onClose,
+  onChanged,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onChanged: (settings: TelegramSettings) => void;
+}) {
+  const queryClient = useQueryClient();
+  const ref = useRef<HTMLDialogElement>(null);
+  const [enabled, setEnabled] = useState(false);
+  const [botToken, setBotToken] = useState("");
+  const [chatId, setChatId] = useState("");
+  const [apiBaseUrl, setApiBaseUrl] = useState("https://api.telegram.org");
+  const [validationError, setValidationError] = useState<string | null>(null);
+  const settingsQuery = useQuery({
+    queryKey: ["telegram"],
+    queryFn: gateApi.telegram,
+    enabled: open,
+    refetchOnWindowFocus: false,
+  });
+  const mutation = useMutation({
+    mutationFn: () => gateApi.updateTelegram({
+      enabled,
+      bot_token: botToken.trim() || null,
+      chat_id: chatId.trim(),
+      api_base_url: apiBaseUrl.trim(),
+    }),
+    onSuccess: (settings) => {
+      queryClient.setQueryData(["telegram"], settings);
+      setBotToken("");
+      setValidationError(null);
+      onChanged(settings);
+    },
+  });
+
+  useEffect(() => {
+    const dialog = ref.current;
+    if (open && dialog && !dialog.open) dialog.showModal();
+    if (!open && dialog?.open) dialog.close();
+  }, [open]);
+
+  useEffect(() => {
+    if (!open || !settingsQuery.data) return;
+    setEnabled(settingsQuery.data.enabled);
+    setChatId(settingsQuery.data.chat_id);
+    setApiBaseUrl(settingsQuery.data.api_base_url);
+    setBotToken("");
+    setValidationError(null);
+  }, [open, settingsQuery.data]);
+
+  const close = () => {
+    if (mutation.isPending) return;
+    setBotToken("");
+    setValidationError(null);
+    mutation.reset();
+    onClose();
+  };
+
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    mutation.reset();
+    if (enabled && !botToken.trim() && !settingsQuery.data?.bot_token_set) {
+      setValidationError("启用 Telegram 时必须设置 Bot Token");
+      return;
+    }
+    if (enabled && !chatId.trim()) {
+      setValidationError("启用 Telegram 时必须设置 Chat ID");
+      return;
+    }
+    setValidationError(null);
+    mutation.mutate();
+  };
+
+  return (
+    <dialog className="switch-dialog password-dialog telegram-dialog" onCancel={(event) => { event.preventDefault(); close(); }} ref={ref}>
+      <div className="dialog-heading">
+        <div><BellRing size={20} /><h2>Telegram 通知设置</h2></div>
+        <button aria-label="关闭 Telegram 通知设置" className="icon-button" disabled={mutation.isPending} onClick={close} title="关闭" type="button"><X size={18} /></button>
+      </div>
+      {settingsQuery.isLoading ? <div className="dialog-loading"><SkeletonRows count={3} /></div> : settingsQuery.isError ? (
+        <div className="empty-state socks-auth-error"><CircleAlert size={24} /><strong>Telegram 设置加载失败</strong><span>{errorMessage(settingsQuery.error)}</span><button className="button button--secondary" onClick={() => void settingsQuery.refetch()} type="button"><RefreshCw size={16} />重新加载</button></div>
+      ) : (
+        <form className="password-form telegram-form" onSubmit={submit}>
+          <label className="auth-toggle" htmlFor="telegram-enabled">
+            <span><strong>启用人工干预通知</strong><small>{settingsQuery.data?.bot_token_masked ? `当前 Token ${settingsQuery.data.bot_token_masked}` : "连续 5 次自动切换失败时推送"}</small></span>
+            <input checked={enabled} id="telegram-enabled" onChange={(event) => { setEnabled(event.target.checked); setValidationError(null); }} type="checkbox" />
+            <i aria-hidden="true" />
+          </label>
+          <label htmlFor="telegram-token">Bot Token</label>
+          <input autoComplete="off" id="telegram-token" onChange={(event) => setBotToken(event.target.value)} placeholder={settingsQuery.data?.bot_token_set ? "留空则保留当前 Token" : "例如 123456:ABC..."} spellCheck={false} type="password" value={botToken} />
+          <small>Token 仅保存于 Gate 主机，不会在界面回显。</small>
+          <label htmlFor="telegram-chat-id">Chat ID</label>
+          <input autoComplete="off" id="telegram-chat-id" onChange={(event) => setChatId(event.target.value)} placeholder="例如 -1001234567890" spellCheck={false} value={chatId} />
+          <label htmlFor="telegram-api-url">API 地址</label>
+          <input autoComplete="url" id="telegram-api-url" onChange={(event) => setApiBaseUrl(event.target.value)} spellCheck={false} value={apiBaseUrl} />
+          {(validationError || mutation.isError) ? <p className="form-error" role="alert"><CircleAlert size={16} />{validationError ?? errorMessage(mutation.error)}</p> : null}
+          <div className="dialog-actions">
+            <button className="button button--secondary" disabled={mutation.isPending} onClick={close} type="button">取消</button>
+            <button className={`button ${enabled ? "button--primary" : "button--danger"}`} disabled={settingsQuery.isLoading || mutation.isPending} type="submit">
+              {mutation.isPending ? <LoaderCircle className="spin" size={16} /> : <BellRing size={16} />}
+              {mutation.isPending ? "正在保存" : enabled ? "保存通知设置" : "关闭通知"}
+            </button>
+          </div>
+        </form>
+      )}
+    </dialog>
+  );
+}
+
 function ConsoleView({
   session,
   onLogout,
@@ -1035,6 +1157,7 @@ function ConsoleView({
   const [disableTarget, setDisableTarget] = useState<Region | null>(null);
   const [passwordOpen, setPasswordOpen] = useState(false);
   const [socksAuthOpen, setSocksAuthOpen] = useState(false);
+  const [telegramOpen, setTelegramOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const streamState = useGateStream(session.authenticated);
   const automationQuery = useQuery({ queryKey: ["automation"], queryFn: gateApi.automation });
@@ -1098,6 +1221,14 @@ function ConsoleView({
       void queryClient.invalidateQueries({ queryKey: ["jobs"] });
     },
   });
+  const switchMutation = useMutation({
+    mutationFn: gateApi.switchRegion,
+    onSuccess: () => {
+      setNotice("出口切换任务已提交；系统将按排除记录随机尝试候选线路");
+      void queryClient.invalidateQueries({ queryKey: ["jobs"] });
+      void queryClient.invalidateQueries({ queryKey: ["regions"] });
+    },
+  });
   const cancelMutation = useMutation({
     mutationFn: (jobId: string) => gateApi.cancelJob(jobId),
     onSuccess: () => {
@@ -1118,7 +1249,7 @@ function ConsoleView({
     },
   });
 
-  const mutationError = refreshMutation.error ?? probeMutation.error ?? modeMutation.error ?? reconnectMutation.error ?? cancelMutation.error ?? automationMutation.error;
+  const mutationError = refreshMutation.error ?? probeMutation.error ?? modeMutation.error ?? reconnectMutation.error ?? switchMutation.error ?? cancelMutation.error ?? automationMutation.error;
   const enabledRegions = useMemo(() => regions.filter((region) => region.mode !== "disabled"), [regions]);
   const liveRegions = useMemo(() => enabledRegions.filter((region) => region.status === "healthy").length, [enabledRegions]);
   const runningJobs = useMemo(() => jobs.filter((job) => ["queued", "running"].includes(job.status)).length, [jobs]);
@@ -1146,6 +1277,7 @@ function ConsoleView({
         <div className="command-actions">
           <button className="button button--dark" disabled={refreshMutation.isPending} onClick={() => refreshMutation.mutate()} type="button">{refreshMutation.isPending ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}{refreshMutation.isPending ? "正在发现" : "刷新节点"}</button>
           <button aria-label="设置 SOCKS 接入" className="icon-button icon-button--dark" onClick={() => setSocksAuthOpen(true)} title="设置 SOCKS 接入" type="button"><ShieldUser size={17} /></button>
+          <button aria-label="设置 Telegram 通知" className="icon-button icon-button--dark" onClick={() => setTelegramOpen(true)} title="设置 Telegram 通知" type="button"><BellRing size={17} /></button>
           {session.security_enabled ? <button aria-label="修改管理密码" className="icon-button icon-button--dark" onClick={() => setPasswordOpen(true)} title="修改管理密码" type="button"><KeyRound size={17} /></button> : null}
           <button aria-label="退出登录" className="icon-button icon-button--dark" onClick={onLogout} title="退出登录" type="button"><LogOut size={17} /></button>
         </div>
@@ -1166,7 +1298,7 @@ function ConsoleView({
         <main className="fatal-state"><CircleAlert size={28} /><h1>控制面暂时不可用</h1><p>{errorMessage(regionsQuery.error)}</p><button className="button button--primary" onClick={() => void regionsQuery.refetch()} type="button"><RefreshCw size={16} />重新连接</button></main>
       ) : (
         <>
-          {(notice || mutationError) ? <div className={`notice ${mutationError ? "notice--error" : ""}`} role={mutationError ? "alert" : "status"}><span>{mutationError ? <CircleAlert size={16} /> : <CircleCheck size={16} />}{mutationError ? errorMessage(mutationError) : notice}</span><button aria-label="关闭通知" className="icon-button" onClick={() => { setNotice(null); refreshMutation.reset(); probeMutation.reset(); modeMutation.reset(); reconnectMutation.reset(); cancelMutation.reset(); automationMutation.reset(); }} type="button"><X size={15} /></button></div> : null}
+          {(notice || mutationError) ? <div className={`notice ${mutationError ? "notice--error" : ""}`} role={mutationError ? "alert" : "status"}><span>{mutationError ? <CircleAlert size={16} /> : <CircleCheck size={16} />}{mutationError ? errorMessage(mutationError) : notice}</span><button aria-label="关闭通知" className="icon-button" onClick={() => { setNotice(null); refreshMutation.reset(); probeMutation.reset(); modeMutation.reset(); reconnectMutation.reset(); switchMutation.reset(); cancelMutation.reset(); automationMutation.reset(); }} type="button"><X size={15} /></button></div> : null}
           {view === "routes" ? (
             <>
               <PortRail onSelect={selectRegion} regions={regions} selectedId={selectedId} />
@@ -1175,7 +1307,7 @@ function ConsoleView({
                   <div className="section-heading"><div><h1 id="routes-title">地区入口</h1><p>同一地区可开启多个固定端口，每个端口使用互不重复的真实出口。</p></div><span className="last-sync"><Clock3 size={14} />{formatTime(regions[0]?.updated_at)}</span></div>
                   <RegionTable healthHistory={healthHistoryQuery.data} healthHistoryLoading={healthHistoryQuery.isLoading} healthHistoryUnavailable={healthHistoryQuery.isError} jobs={jobs} listen={socksAuthQuery.data?.listen ?? "127.0.0.1"} modePendingRegionId={modeMutation.isPending ? modeMutation.variables?.regionId ?? null : null} onSelect={selectRegion} onToggle={toggleRegion} regions={regions} runtimeUnavailable={slotsQuery.isError} selectedId={selectedId} slots={slots} />
                 </section>
-                {selectedRegion ? <RegionInspector activeJob={activeJob} listen={socksAuthQuery.data?.listen ?? "127.0.0.1"} modePending={modeMutation.isPending && modeMutation.variables?.regionId === selectedRegion.id} onMode={(mode) => modeMutation.mutate({ regionId: selectedRegion.id, mode })} onProbe={() => probeMutation.mutate(selectedRegion.id)} onReconnect={() => reconnectMutation.mutate(selectedRegion.id)} onToggle={() => toggleRegion(selectedRegion)} probePending={probeMutation.isPending} reconnectPending={reconnectMutation.isPending} region={selectedRegion} runtimeUnavailable={slotsQuery.isError} slots={selectedSlots} /> : null}
+                {selectedRegion ? <RegionInspector activeJob={activeJob} listen={socksAuthQuery.data?.listen ?? "127.0.0.1"} modePending={modeMutation.isPending && modeMutation.variables?.regionId === selectedRegion.id} onMode={(mode) => modeMutation.mutate({ regionId: selectedRegion.id, mode })} onProbe={() => probeMutation.mutate(selectedRegion.id)} onReconnect={() => reconnectMutation.mutate(selectedRegion.id)} onSwitch={() => switchMutation.mutate(selectedRegion.id)} onToggle={() => toggleRegion(selectedRegion)} probePending={probeMutation.isPending} reconnectPending={reconnectMutation.isPending} switchPending={switchMutation.isPending} region={selectedRegion} runtimeUnavailable={slotsQuery.isError} slots={selectedSlots} /> : null}
               </main>
             </>
           ) : view === "jobs" ? (
@@ -1193,6 +1325,7 @@ function ConsoleView({
       )}
       <DisableRegionDialog busy={modeMutation.isPending && modeMutation.variables?.mode === "disabled"} onCancel={() => setDisableTarget(null)} onConfirm={() => { if (disableTarget) modeMutation.mutate({ regionId: disableTarget.id, mode: "disabled" }); }} region={disableTarget} />
       <SocksAuthDialog onChanged={(state) => { setSocksAuthOpen(false); setNotice(`SOCKS 已监听 ${state.listen}；${state.enabled ? `统一用户名为 ${state.username}` : "认证已关闭"}`); void queryClient.invalidateQueries({ queryKey: ["events"] }); }} onClose={() => setSocksAuthOpen(false)} open={socksAuthOpen} />
+      <TelegramSettingsDialog onChanged={(settings) => { setTelegramOpen(false); setNotice(settings.enabled ? "Telegram 通知设置已保存" : "Telegram 通知已关闭"); void queryClient.invalidateQueries({ queryKey: ["events"] }); }} onClose={() => setTelegramOpen(false)} open={telegramOpen} />
       <ChangePasswordDialog onChanged={(updatedSession) => { onSessionChange(updatedSession); setPasswordOpen(false); setNotice("管理密码已修改，其他登录会话已失效"); void queryClient.invalidateQueries({ queryKey: ["events"] }); }} onClose={() => setPasswordOpen(false)} open={passwordOpen} />
     </div>
   );

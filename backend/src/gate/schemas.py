@@ -47,6 +47,21 @@ class AutomationResponse(BaseModel):
     enabled: bool
 
 
+class TelegramSettingsUpdateRequest(BaseModel):
+    enabled: bool
+    bot_token: str | None = Field(default=None, max_length=256)
+    chat_id: str = Field(default="", max_length=128)
+    api_base_url: str = Field(default="https://api.telegram.org", max_length=255)
+
+
+class TelegramSettingsResponse(BaseModel):
+    enabled: bool
+    bot_token_set: bool
+    bot_token_masked: str | None
+    chat_id: str
+    api_base_url: str
+
+
 class SessionResponse(BaseModel):
     authenticated: bool
     security_enabled: bool = True

@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
 from gate import __version__
-from gate.config import GateSettings, SocksAuthConfig, load_settings
+from gate.config import GateSettings, SocksAuthConfig, TelegramConfig, load_settings
 from gate.controller import AutomationController
 from gate.coordinator import SwitchCoordinator
 from gate.database import Database, JobStatus, utc_now
@@ -43,6 +43,8 @@ from gate.schemas import (
     SlotRuntimeResponse,
     SocksAuthResponse,
     SocksAuthUpdateRequest,
+    TelegramSettingsResponse,
+    TelegramSettingsUpdateRequest,
 )
 from gate.scoring import calculate_quality
 from gate.security import SESSION_COOKIE, SessionError, SessionManager
@@ -95,12 +97,13 @@ def create_app(
     if isinstance(app_coordinator, SwitchCoordinator):
         app_coordinator.set_socks_auth(app_settings.socks_auth)
     app_worker_health = worker_health or WorkerClient(timeout_seconds=1.0)
+    app_telegram = TelegramNotifier(app_settings.telegram)
     app_automation = AutomationController(
         app_settings,
         app_database,
         app_discovery,
         app_coordinator,
-        notifier=TelegramNotifier(app_settings.telegram),
+        notifier=app_telegram,
     )
     app_sessions = SessionManager(
         app_settings.security,
@@ -136,6 +139,10 @@ def create_app(
             if stored_automation_enabled is None
             else stored_automation_enabled
         )
+        stored_telegram = await app_database.get_telegram_settings()
+        if stored_telegram is not None:
+            app_settings.telegram = stored_telegram
+            app_telegram.set_config(stored_telegram)
         await app_database.fail_interrupted_jobs()
         await app_database.cleanup_retention(**app_settings.retention.model_dump())
         if reconcile_on_startup:
@@ -386,6 +393,34 @@ def create_app(
                 },
             )
 
+    async def run_manual_switch_job(job_id: str, region_id: str) -> None:
+        await app_database.update_job(
+            job_id,
+            status=JobStatus.RUNNING,
+            progress=0.1,
+            detail={"message": "正在选择新的出口"},
+        )
+        try:
+            switched = await app_automation.attempt_region(region_id, automatic=False)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await app_database.update_job(
+                job_id,
+                status=JobStatus.FAILED,
+                progress=1.0,
+                error_code=exc.code if isinstance(exc, GateError) else "SWITCH_FAILED",
+                detail={"message": str(exc)},
+            )
+            return
+        await app_database.update_job(
+            job_id,
+            status=JobStatus.SUCCEEDED if switched else JobStatus.FAILED,
+            progress=1.0,
+            error_code=None if switched else "SWITCH_FAILED",
+            detail={"message": "出口切换完成" if switched else "没有候选出口切换成功"},
+        )
+
     @app.get("/api/v1/meta", response_model=MetaResponse)
     async def meta() -> MetaResponse:
         return MetaResponse(version=__version__)
@@ -477,6 +512,51 @@ def create_app(
         await app_database.set_automation_enabled(payload.enabled)
         app_automation.set_enabled(payload.enabled)
         return AutomationResponse(enabled=app_automation.enabled)
+
+    def telegram_response(settings: TelegramConfig) -> TelegramSettingsResponse:
+        token = settings.bot_token.strip()
+        masked = f"***{token[-4:]}" if token else None
+        return TelegramSettingsResponse(
+            enabled=settings.enabled,
+            bot_token_set=bool(token),
+            bot_token_masked=masked,
+            chat_id=settings.chat_id,
+            api_base_url=settings.api_base_url,
+        )
+
+    @app.get("/api/v1/telegram", response_model=TelegramSettingsResponse)
+    async def get_telegram_settings() -> TelegramSettingsResponse:
+        return telegram_response(app_settings.telegram)
+
+    @app.put("/api/v1/telegram", response_model=TelegramSettingsResponse)
+    async def update_telegram_settings(
+        payload: TelegramSettingsUpdateRequest,
+    ) -> TelegramSettingsResponse:
+        current = app_settings.telegram
+        token = (payload.bot_token or current.bot_token).strip()
+        chat_id = payload.chat_id.strip()
+        if payload.enabled and (not token or not chat_id):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="启用 Telegram 通知时必须设置 Bot Token 和 Chat ID",
+            )
+        try:
+            updated = TelegramConfig(
+                enabled=payload.enabled,
+                bot_token=token,
+                chat_id=chat_id,
+                api_base_url=payload.api_base_url.strip() or current.api_base_url,
+                timeout_seconds=current.timeout_seconds,
+            )
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Telegram 设置无效",
+            ) from exc
+        await app_database.set_telegram_settings(updated)
+        app_settings.telegram = updated
+        app_telegram.set_config(updated)
+        return telegram_response(updated)
 
     @app.put("/api/v1/socks-auth", response_model=SocksAuthResponse)
     async def update_socks_auth(payload: SocksAuthUpdateRequest) -> SocksAuthResponse:
@@ -790,6 +870,21 @@ def create_app(
             )
         job = await app_database.create_job(kind="switch", region_id=region_id)
         schedule_job(job.id, run_switch_job(job.id, region_id, node_id))
+        return JobResponse.model_validate(job)
+
+    @app.post(
+        "/api/v1/regions/{region_id}/switch",
+        response_model=JobResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    async def switch_region(region_id: str) -> JobResponse:
+        region = await app_database.get_region(region_id)
+        if region is None:
+            raise HTTPException(status_code=404, detail="Region not found")
+        if not region.enabled or region.mode == "disabled":
+            raise HTTPException(status_code=409, detail="Region is disabled")
+        job = await app_database.create_job(kind="switch", region_id=region_id)
+        schedule_job(job.id, run_manual_switch_job(job.id, region_id))
         return JobResponse.model_validate(job)
 
     @app.post(

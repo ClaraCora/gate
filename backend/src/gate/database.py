@@ -31,7 +31,7 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from gate.config import RegionConfig
+from gate.config import RegionConfig, TelegramConfig
 from gate.domain import ProbeMetrics, RegionMode, RegionStatus, SanitizedProfile, VpnGateNode
 
 
@@ -227,6 +227,18 @@ class AutomationStateRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class TelegramSettingsRecord(Base):
+    __tablename__ = "telegram_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    bot_token: Mapped[str] = mapped_column(Text, default="")
+    chat_id: Mapped[str] = mapped_column(String(128), default="")
+    api_base_url: Mapped[str] = mapped_column(String(255), default="https://api.telegram.org")
+    timeout_seconds: Mapped[float] = mapped_column(Float, default=10.0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class Database:
     def __init__(self, url: str) -> None:
         self.engine: AsyncEngine = create_async_engine(url)
@@ -381,6 +393,52 @@ class Database:
                         details={"enabled": enabled},
                     )
                 )
+
+    async def get_telegram_settings(self) -> TelegramConfig | None:
+        async with self.sessions() as session:
+            record = await session.get(TelegramSettingsRecord, 1)
+            if record is None:
+                return None
+            return TelegramConfig(
+                enabled=record.enabled,
+                bot_token=record.bot_token,
+                chat_id=record.chat_id,
+                api_base_url=record.api_base_url,
+                timeout_seconds=record.timeout_seconds,
+            )
+
+    async def set_telegram_settings(self, settings: TelegramConfig) -> None:
+        async with self.sessions() as session, session.begin():
+            record = await session.get(TelegramSettingsRecord, 1)
+            if record is None:
+                session.add(
+                    TelegramSettingsRecord(
+                        id=1,
+                        enabled=settings.enabled,
+                        bot_token=settings.bot_token,
+                        chat_id=settings.chat_id,
+                        api_base_url=settings.api_base_url,
+                        timeout_seconds=settings.timeout_seconds,
+                    )
+                )
+            else:
+                record.enabled = settings.enabled
+                record.bot_token = settings.bot_token
+                record.chat_id = settings.chat_id
+                record.api_base_url = settings.api_base_url
+                record.timeout_seconds = settings.timeout_seconds
+                record.updated_at = utc_now()
+            session.add(
+                EventRecord(
+                    code="TELEGRAM_SETTINGS_UPDATED",
+                    message=f"Telegram 通知已{'开启' if settings.enabled else '关闭'}",
+                    details={
+                        "enabled": settings.enabled,
+                        "chat_id": settings.chat_id,
+                        "bot_token_set": bool(settings.bot_token),
+                    },
+                )
+            )
 
     async def ingest_nodes(
         self, items: Iterable[tuple[VpnGateNode, SanitizedProfile]], observed_at: datetime

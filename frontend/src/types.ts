@@ -34,6 +34,21 @@ export interface AutomationState {
   enabled: boolean;
 }
 
+export interface TelegramSettings {
+  enabled: boolean;
+  bot_token_set: boolean;
+  bot_token_masked: string | null;
+  chat_id: string;
+  api_base_url: string;
+}
+
+export interface TelegramSettingsUpdate {
+  enabled: boolean;
+  bot_token: string | null;
+  chat_id: string;
+  api_base_url: string;
+}
+
 export interface Region {
   id: string;
   group_id: string;

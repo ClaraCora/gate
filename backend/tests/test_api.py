@@ -164,6 +164,70 @@ async def test_automation_api_persists_global_switch(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_telegram_api_hides_token_and_persists_settings(tmp_path: Path) -> None:
+    database_url = _database_url(tmp_path / "telegram-api.db")
+    settings = _settings(tmp_path / "telegram-api.db")
+    app = create_app(
+        settings,
+        database=Database(database_url),
+        reconcile_on_startup=False,
+        automation_on_startup=False,
+    )
+
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            initial = await client.get("/api/v1/telegram")
+            updated = await client.put(
+                "/api/v1/telegram",
+                json={
+                    "enabled": True,
+                    "bot_token": "123456:SECRET",
+                    "chat_id": "-100123",
+                },
+                headers=MUTATION_HEADERS,
+            )
+            visible = await client.get("/api/v1/telegram")
+
+    assert initial.json()["enabled"] is False
+    assert updated.json() == {
+        "enabled": True,
+        "bot_token_set": True,
+        "bot_token_masked": "***CRET",
+        "chat_id": "-100123",
+        "api_base_url": "https://api.telegram.org",
+    }
+    assert "123456:SECRET" not in visible.text
+
+    restarted = create_app(
+        settings,
+        database=Database(database_url),
+        reconcile_on_startup=False,
+        automation_on_startup=False,
+    )
+    async with restarted.router.lifespan_context(restarted):
+        transport = httpx.ASGITransport(app=restarted)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            persisted = await client.get("/api/v1/telegram")
+    assert persisted.json() == updated.json()
+
+
+@pytest.mark.asyncio
+async def test_manual_switch_api_queues_selection_job(tmp_path: Path) -> None:
+    app = create_app(
+        _settings(tmp_path / "manual-switch.db"),
+        reconcile_on_startup=False,
+        automation_on_startup=False,
+    )
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/api/v1/regions/jp/switch", headers=MUTATION_HEADERS)
+    assert response.status_code == 202
+    assert response.json()["kind"] == "switch"
+
+
+@pytest.mark.asyncio
 async def test_runtime_slot_reads_are_cached(tmp_path: Path) -> None:
     worker = InspectingWorker()
     app = create_app(

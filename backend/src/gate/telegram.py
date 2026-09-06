@@ -14,6 +14,9 @@ class TelegramNotifier:
     def __init__(self, config: TelegramConfig) -> None:
         self.config = config
 
+    def set_config(self, config: TelegramConfig) -> None:
+        self.config = config
+
     async def send(self, message: str) -> bool:
         if not self.config.enabled:
             return False

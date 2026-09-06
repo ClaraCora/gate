@@ -3,7 +3,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { PropsWithChildren } from "react";
 
 import { gateApi } from "./api";
-import { AutomationControl, HealthGrains, RegionTable, SocksAuthDialog, useGateStream } from "./App";
+import { AutomationControl, HealthGrains, RegionTable, SocksAuthDialog, TelegramSettingsDialog, useGateStream } from "./App";
 import type { HealthCheck, Region } from "./types";
 
 function wrapper({ children }: PropsWithChildren) {
@@ -303,6 +303,41 @@ describe("SocksAuthDialog", () => {
       username: "public_user",
       password: "p@ssw0rd",
       listen: "0.0.0.0",
+    }));
+  });
+});
+
+describe("TelegramSettingsDialog", () => {
+  it("loads, validates, and saves notification settings", async () => {
+    vi.spyOn(gateApi, "telegram").mockResolvedValue({
+      enabled: false,
+      bot_token_set: false,
+      bot_token_masked: null,
+      chat_id: "",
+      api_base_url: "https://api.telegram.org",
+    });
+    const update = vi.spyOn(gateApi, "updateTelegram").mockResolvedValue({
+      enabled: true,
+      bot_token_set: true,
+      bot_token_masked: "***7890",
+      chat_id: "-100123",
+      api_base_url: "https://api.telegram.org",
+    });
+    render(<TelegramSettingsDialog onChanged={() => undefined} onClose={() => undefined} open />, { wrapper });
+
+    fireEvent.click(await screen.findByRole("checkbox", { name: /启用人工干预通知/ }));
+    fireEvent.click(screen.getByRole("button", { name: "保存通知设置" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Bot Token");
+    expect(update).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByLabelText("Bot Token"), { target: { value: "123456:ABC" } });
+    fireEvent.change(screen.getByLabelText("Chat ID"), { target: { value: "-100123" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存通知设置" }));
+    await waitFor(() => expect(update).toHaveBeenCalledWith({
+      enabled: true,
+      bot_token: "123456:ABC",
+      chat_id: "-100123",
+      api_base_url: "https://api.telegram.org",
     }));
   });
 });
