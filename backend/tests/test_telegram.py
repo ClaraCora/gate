@@ -169,4 +169,4 @@ async def test_telegram_bot_shortcuts_and_cancel_do_not_switch() -> None:
         }
     )
     assert switched == []
-    assert sent[-1][0] == "已取消切换。"
+    assert str(sent[-1][0]) == "已取消切换。"

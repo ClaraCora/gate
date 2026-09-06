@@ -263,7 +263,7 @@ async def test_telegram_status_provider_uses_two_hour_window(tmp_path: Path) -> 
             captured.append((since, until))
             return []
 
-        database.list_active_health_probes = list_active_health_probes  # type: ignore[method-assign]
+        database.list_active_health_probes = list_active_health_probes
         status_provider = app.state.telegram_bot.status_provider
         assert status_provider is not None
         await status_provider()
