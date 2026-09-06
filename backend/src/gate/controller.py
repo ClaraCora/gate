@@ -220,7 +220,7 @@ class AutomationController:
                 continue
             if automatic:
                 self.failure_counts[region.id] = 0
-                await self.database.reset_switch_failure_streak(region.id)
+            await self.database.reset_switch_failure_streak(region.id)
             return True
 
         if all(candidate.id in failed_nodes for candidate in eligible):

@@ -48,7 +48,7 @@ from gate.schemas import (
 )
 from gate.scoring import calculate_quality
 from gate.security import SESSION_COOKIE, SessionError, SessionManager
-from gate.telegram import TelegramNotifier
+from gate.telegram import TelegramBot, TelegramNotifier
 from gate.worker_client import WorkerClient
 from gate.worker_protocol import HealthRequest, InspectRequest, UpdateSocksAuthRequest
 from gate.worker_protocol import Request as WorkerRequest
@@ -98,6 +98,7 @@ def create_app(
         app_coordinator.set_socks_auth(app_settings.socks_auth)
     app_worker_health = worker_health or WorkerClient(timeout_seconds=1.0)
     app_telegram = TelegramNotifier(app_settings.telegram)
+    app_telegram_bot = TelegramBot(app_telegram)
     app_automation = AutomationController(
         app_settings,
         app_database,
@@ -151,6 +152,9 @@ def create_app(
             task = asyncio.create_task(app_automation.run_forever())
             background_tasks.add(task)
             task.add_done_callback(background_tasks.discard)
+        telegram_task = asyncio.create_task(app_telegram_bot.run_forever())
+        background_tasks.add(telegram_task)
+        telegram_task.add_done_callback(background_tasks.discard)
         yield
         for task in background_tasks:
             task.cancel()
@@ -170,6 +174,7 @@ def create_app(
     app.state.discovery = app_discovery
     app.state.coordinator = app_coordinator
     app.state.automation = app_automation
+    app.state.telegram_bot = app_telegram_bot
     app.state.worker = app_worker
     app.state.sessions = app_sessions
 
@@ -421,6 +426,56 @@ def create_app(
             detail={"message": "出口切换完成" if switched else "没有候选出口切换成功"},
         )
 
+    async def queue_manual_switch(region_id: str) -> JobResponse:
+        region = await app_database.get_region(region_id)
+        if region is None:
+            raise HTTPException(status_code=404, detail="Region not found")
+        if not region.enabled or region.mode == "disabled":
+            raise HTTPException(status_code=409, detail="Region is disabled")
+        job = await app_database.create_job(kind="switch", region_id=region_id)
+        schedule_job(job.id, run_manual_switch_job(job.id, region_id))
+        return JobResponse.model_validate(job)
+
+    async def telegram_status() -> tuple[str, list[list[dict[str, str]]]]:
+        now = utc_now()
+        checks = await app_database.list_active_health_probes(
+            now - timedelta(hours=24),
+            now,
+        )
+        totals: dict[str, tuple[int, int]] = {}
+        for check in checks:
+            succeeded, total = totals.get(check.region_id, (0, 0))
+            totals[check.region_id] = (
+                succeeded + (1 if check.result == "succeeded" else 0),
+                total + 1,
+            )
+        lines = ["Gate 出口状态 (近 24 小时)"]
+        keyboard: list[list[dict[str, str]]] = []
+        for region, _candidate_count in await app_database.list_regions():
+            active_ip = region.active_egress_ip or "未分配"
+            succeeded, total = totals.get(region.id, (0, 0))
+            lines.append(f"{region.name} - {active_ip} - 成功率 {succeeded}/{total}")
+            if region.enabled and region.mode != "disabled":
+                keyboard.append(
+                    [{"text": f"切换 {region.name}", "callback_data": f"switch:{region.id}"}]
+                )
+        return "\n".join(lines), keyboard
+
+    async def telegram_switch(region_id: str) -> str:
+        region = await app_database.get_region(region_id)
+        if region is None:
+            return f"入口 {region_id} 不存在"
+        try:
+            job = await queue_manual_switch(region_id)
+        except HTTPException as exc:
+            return f"{region.name} 无法切换: {exc.detail}"
+        return f"{region.name} 已提交切换任务\n任务 ID: {job.id}\n请稍后发送 /status 查看结果"
+
+    app_telegram_bot.set_handlers(
+        status_provider=telegram_status,
+        switch_handler=telegram_switch,
+    )
+
     @app.get("/api/v1/meta", response_model=MetaResponse)
     async def meta() -> MetaResponse:
         return MetaResponse(version=__version__)
@@ -556,6 +611,7 @@ def create_app(
         await app_database.set_telegram_settings(updated)
         app_settings.telegram = updated
         app_telegram.set_config(updated)
+        app_telegram_bot.reset_offset()
         return telegram_response(updated)
 
     @app.put("/api/v1/socks-auth", response_model=SocksAuthResponse)
@@ -878,14 +934,7 @@ def create_app(
         status_code=status.HTTP_202_ACCEPTED,
     )
     async def switch_region(region_id: str) -> JobResponse:
-        region = await app_database.get_region(region_id)
-        if region is None:
-            raise HTTPException(status_code=404, detail="Region not found")
-        if not region.enabled or region.mode == "disabled":
-            raise HTTPException(status_code=409, detail="Region is disabled")
-        job = await app_database.create_job(kind="switch", region_id=region_id)
-        schedule_job(job.id, run_manual_switch_job(job.id, region_id))
-        return JobResponse.model_validate(job)
+        return await queue_manual_switch(region_id)
 
     @app.post(
         "/api/v1/regions/{region_id}/candidates/{node_id}/probe",

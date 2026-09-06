@@ -34,6 +34,11 @@ systemctl restart gate-api
 下一轮连续失败会重新触发通知。通知发送失败不会阻塞切换流程，事件会记录在 WebUI 的
 “事件”页和 `gate-api` 日志中。
 
+启用后，向该聊天发送 `/status` 可查看各入口的名称、实际出口 IP 和近 24 小时健康检查成功率，
+格式为“名称 - IP - 成功率 成功次数/总次数”。状态消息中的“切换”按钮会提交对应入口的自动
+候选切换；也可以发送 `/switch <入口ID>`，例如 `/switch jp`。Bot 通过长轮询连接 Telegram，
+无需为 Gate 暴露公网 webhook 端口。
+
 面板中的“当前节点 IP”是 VPN Gate 服务器的远端地址；“实际出口 IP”是该服务器访问公网时
 呈现的地址。两者经过 VPN 转发和出口 NAT 后通常不同，这是正常现象。Gate 只把后者作为
 出口验证结果，并用 Cloudflare trace 与 ipify 交叉核对。

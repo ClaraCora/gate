@@ -228,6 +228,23 @@ async def test_manual_switch_api_queues_selection_job(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_telegram_status_provider_lists_exit_ip_success_rate_and_switch_buttons(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        _settings(tmp_path / "telegram-status.db"),
+        reconcile_on_startup=False,
+        automation_on_startup=False,
+    )
+    async with app.router.lifespan_context(app):
+        status_provider = app.state.telegram_bot.status_provider
+        assert status_provider is not None
+        message, keyboard = await status_provider()
+    assert "日本 01 - 未分配 - 成功率 0/0" in message
+    assert keyboard[0] == [{"text": "切换 日本 01", "callback_data": "switch:jp"}]
+
+
+@pytest.mark.asyncio
 async def test_runtime_slot_reads_are_cached(tmp_path: Path) -> None:
     worker = InspectingWorker()
     app = create_app(
