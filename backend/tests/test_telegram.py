@@ -114,9 +114,7 @@ async def test_telegram_bot_callback_queues_requested_region() -> None:
         }
     )
     assert answered == [{"callback_query_id": "callback-1"}]
-    assert sent == [
-        "确认切换到「jp-02」?\n\n系统将按排除机制随机尝试最多 5 个候选出口。"
-    ]
+    assert sent == ["确认切换到「jp-02」?\n\n系统将按排除机制随机尝试最多 5 个候选出口。"]
 
     await bot.handle_update(
         {
