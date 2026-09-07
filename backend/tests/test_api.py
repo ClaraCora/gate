@@ -11,7 +11,13 @@ from typing import cast
 import httpx
 import pytest
 from gate.api import create_app
-from gate.config import DatabaseConfig, SecurityConfig, load_settings
+from gate.config import (
+    DatabaseConfig,
+    SecurityConfig,
+    SocksAuthConfig,
+    TelegramConfig,
+    load_settings,
+)
 from gate.coordinator import (
     CandidateProbeResult,
     ProgressCallable,
@@ -211,6 +217,51 @@ async def test_telegram_api_hides_token_and_persists_settings(tmp_path: Path) ->
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             persisted = await client.get("/api/v1/telegram")
     assert persisted.json() == updated.json()
+
+
+@pytest.mark.asyncio
+async def test_settings_backup_redacts_credentials(tmp_path: Path) -> None:
+    settings = _settings(tmp_path / "settings-backup.db").model_copy(
+        update={
+            "socks_auth": SocksAuthConfig(
+                enabled=True,
+                username="gate_user",
+                password="strong!proxy#password",
+            ),
+            "telegram": TelegramConfig(
+                enabled=True,
+                bot_token="123456:SECRET",
+                chat_id="-100123",
+            ),
+        }
+    )
+    app = create_app(
+        settings,
+        reconcile_on_startup=False,
+        automation_on_startup=False,
+    )
+
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/api/v1/settings/backup")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["format"] == "gate-settings-backup"
+    assert payload["version"] == 1
+    assert payload["settings"]["socks_auth"]["username"] == "gate_user"
+    assert "password" not in payload["settings"]["socks_auth"]
+    assert "bot_token" not in payload["settings"]["telegram"]
+    assert payload["settings"]["telegram"]["chat_id"] == "-100123"
+    assert "strong!proxy#password" not in response.text
+    assert "123456:SECRET" not in response.text
+    assert payload["redacted_fields"] == [
+        "socks_auth.password",
+        "telegram.bot_token",
+        "security.password_hash",
+        "security.session_secret",
+    ]
 
 
 @pytest.mark.asyncio

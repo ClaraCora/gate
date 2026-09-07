@@ -41,6 +41,10 @@ systemctl restart gate-api
 需要确认。Bot 会提供“查看状态”“切换出口”“使用帮助”快捷键盘，并通过长轮询连接 Telegram，
 无需为 Gate 暴露公网 webhook 端口。
 
+WebUI 顶部的下载图标可导出当前运行设置的 JSON 备份。备份会自动排除 SOCKS 密码、Telegram Bot
+Token、管理员密码和会话密钥；导出的文件用于迁移前核对和恢复配置结构，敏感凭据需要在目标主机
+上重新设置。
+
 面板中的“当前节点 IP”是 VPN Gate 服务器的远端地址；“实际出口 IP”是该服务器访问公网时
 呈现的地址。两者经过 VPN 转发和出口 NAT 后通常不同，这是正常现象。Gate 只把后者作为
 出口验证结果，并用 Cloudflare trace 与 ipify 交叉核对。

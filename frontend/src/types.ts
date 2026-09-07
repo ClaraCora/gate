@@ -34,6 +34,14 @@ export interface AutomationState {
   enabled: boolean;
 }
 
+export interface SettingsBackup {
+  format: "gate-settings-backup";
+  version: number;
+  exported_at: string;
+  redacted_fields: string[];
+  settings: Record<string, unknown>;
+}
+
 export interface TelegramSettings {
   enabled: boolean;
   bot_token_set: boolean;

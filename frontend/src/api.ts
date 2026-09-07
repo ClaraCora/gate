@@ -8,6 +8,7 @@ import type {
   Region,
   RegionMode,
   RuntimeSlot,
+  SettingsBackup,
   SessionState,
   SocksAuthState,
   SocksAuthUpdate,
@@ -95,6 +96,7 @@ export const gateApi = {
       body: JSON.stringify(update),
     }),
   automation: () => request<AutomationState>("/api/v1/automation"),
+  settingsBackup: () => request<SettingsBackup>("/api/v1/settings/backup"),
   updateAutomation: (enabled: boolean) =>
     request<AutomationState>("/api/v1/automation", {
       method: "PUT",

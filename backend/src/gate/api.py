@@ -40,6 +40,7 @@ from gate.schemas import (
     RegionModeRequest,
     RegionResponse,
     SessionResponse,
+    SettingsBackupResponse,
     SlotRuntimeResponse,
     SocksAuthResponse,
     SocksAuthUpdateRequest,
@@ -576,6 +577,32 @@ def create_app(
     @app.get("/api/v1/automation", response_model=AutomationResponse)
     async def get_automation() -> AutomationResponse:
         return AutomationResponse(enabled=app_automation.enabled)
+
+    @app.get("/api/v1/settings/backup", response_model=SettingsBackupResponse)
+    async def export_settings_backup() -> SettingsBackupResponse:
+        settings = app_settings.model_dump(mode="json")
+        automation = settings.get("automation")
+        if isinstance(automation, dict):
+            automation["enabled"] = app_automation.enabled
+        socks_auth = settings.get("socks_auth")
+        if isinstance(socks_auth, dict):
+            socks_auth.pop("password", None)
+        telegram = settings.get("telegram")
+        if isinstance(telegram, dict):
+            telegram.pop("bot_token", None)
+        exported_at = utc_now()
+        return SettingsBackupResponse(
+            format="gate-settings-backup",
+            version=1,
+            exported_at=exported_at,
+            redacted_fields=[
+                "socks_auth.password",
+                "telegram.bot_token",
+                "security.password_hash",
+                "security.session_secret",
+            ],
+            settings=settings,
+        )
 
     @app.put("/api/v1/automation", response_model=AutomationResponse)
     async def update_automation(payload: AutomationUpdateRequest) -> AutomationResponse:

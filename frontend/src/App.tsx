@@ -11,6 +11,7 @@ import {
   CircleCheck,
   CircleOff,
   Clock3,
+  Download,
   Eye,
   EyeOff,
   Gauge,
@@ -1248,8 +1249,25 @@ function ConsoleView({
       void queryClient.invalidateQueries({ queryKey: ["events"] });
     },
   });
+  const backupMutation = useMutation({
+    mutationFn: gateApi.settingsBackup,
+    onSuccess: (backup) => {
+      const payload = `${JSON.stringify(backup, null, 2)}\n`;
+      const url = URL.createObjectURL(new Blob([payload], { type: "application/json" }));
+      const link = document.createElement("a");
+      link.href = url;
+      const date = new Date().toISOString().slice(0, 10);
+      link.download = `gate-settings-${date}.json`;
+      link.hidden = true;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+      setNotice("设置备份已下载（敏感凭据已排除）");
+    },
+  });
 
-  const mutationError = refreshMutation.error ?? probeMutation.error ?? modeMutation.error ?? reconnectMutation.error ?? switchMutation.error ?? cancelMutation.error ?? automationMutation.error;
+  const mutationError = refreshMutation.error ?? probeMutation.error ?? modeMutation.error ?? reconnectMutation.error ?? switchMutation.error ?? cancelMutation.error ?? automationMutation.error ?? backupMutation.error;
   const enabledRegions = useMemo(() => regions.filter((region) => region.mode !== "disabled"), [regions]);
   const liveRegions = useMemo(() => enabledRegions.filter((region) => region.status === "healthy").length, [enabledRegions]);
   const runningJobs = useMemo(() => jobs.filter((job) => ["queued", "running"].includes(job.status)).length, [jobs]);
@@ -1276,6 +1294,7 @@ function ConsoleView({
         </nav>
         <div className="command-actions">
           <button className="button button--dark" disabled={refreshMutation.isPending} onClick={() => refreshMutation.mutate()} type="button">{refreshMutation.isPending ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}{refreshMutation.isPending ? "正在发现" : "刷新节点"}</button>
+          <button aria-label="导出设置备份" className="icon-button icon-button--dark" disabled={backupMutation.isPending} onClick={() => backupMutation.mutate()} title="导出设置备份" type="button">{backupMutation.isPending ? <LoaderCircle className="spin" size={17} /> : <Download size={17} />}</button>
           <button aria-label="设置 SOCKS 接入" className="icon-button icon-button--dark" onClick={() => setSocksAuthOpen(true)} title="设置 SOCKS 接入" type="button"><ShieldUser size={17} /></button>
           <button aria-label="设置 Telegram 通知" className="icon-button icon-button--dark" onClick={() => setTelegramOpen(true)} title="设置 Telegram 通知" type="button"><BellRing size={17} /></button>
           {session.security_enabled ? <button aria-label="修改管理密码" className="icon-button icon-button--dark" onClick={() => setPasswordOpen(true)} title="修改管理密码" type="button"><KeyRound size={17} /></button> : null}
@@ -1298,7 +1317,7 @@ function ConsoleView({
         <main className="fatal-state"><CircleAlert size={28} /><h1>控制面暂时不可用</h1><p>{errorMessage(regionsQuery.error)}</p><button className="button button--primary" onClick={() => void regionsQuery.refetch()} type="button"><RefreshCw size={16} />重新连接</button></main>
       ) : (
         <>
-          {(notice || mutationError) ? <div className={`notice ${mutationError ? "notice--error" : ""}`} role={mutationError ? "alert" : "status"}><span>{mutationError ? <CircleAlert size={16} /> : <CircleCheck size={16} />}{mutationError ? errorMessage(mutationError) : notice}</span><button aria-label="关闭通知" className="icon-button" onClick={() => { setNotice(null); refreshMutation.reset(); probeMutation.reset(); modeMutation.reset(); reconnectMutation.reset(); switchMutation.reset(); cancelMutation.reset(); automationMutation.reset(); }} type="button"><X size={15} /></button></div> : null}
+          {(notice || mutationError) ? <div className={`notice ${mutationError ? "notice--error" : ""}`} role={mutationError ? "alert" : "status"}><span>{mutationError ? <CircleAlert size={16} /> : <CircleCheck size={16} />}{mutationError ? errorMessage(mutationError) : notice}</span><button aria-label="关闭通知" className="icon-button" onClick={() => { setNotice(null); refreshMutation.reset(); probeMutation.reset(); modeMutation.reset(); reconnectMutation.reset(); switchMutation.reset(); cancelMutation.reset(); automationMutation.reset(); backupMutation.reset(); }} type="button"><X size={15} /></button></div> : null}
           {view === "routes" ? (
             <>
               <PortRail onSelect={selectRegion} regions={regions} selectedId={selectedId} />

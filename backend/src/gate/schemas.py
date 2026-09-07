@@ -47,6 +47,14 @@ class AutomationResponse(BaseModel):
     enabled: bool
 
 
+class SettingsBackupResponse(BaseModel):
+    format: Literal["gate-settings-backup"]
+    version: int = Field(ge=1)
+    exported_at: datetime
+    redacted_fields: list[str]
+    settings: dict[str, Any]
+
+
 class TelegramSettingsUpdateRequest(BaseModel):
     enabled: bool
     bot_token: str | None = Field(default=None, max_length=256)
