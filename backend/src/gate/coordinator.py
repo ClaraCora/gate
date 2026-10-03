@@ -433,10 +433,6 @@ class SwitchCoordinator:
             raise SwitchError("candidate profile is not cached; refresh discovery and retry")
         active = await self.database.get_active_slot(region_id)
         previous_status = RegionStatus(region.status)
-        old_route_usable = active is not None and previous_status in {
-            RegionStatus.HEALTHY,
-            RegionStatus.DEGRADED,
-        }
         target_slot = self._target_slot(active)
         target_enabled = False
 
@@ -528,10 +524,10 @@ class SwitchCoordinator:
             if target_enabled:
                 await self.haproxy.disable(region_id, target_slot)
             if active is not None:
-                if old_route_usable:
-                    await self.haproxy.ready(region_id, active.slot)
-                else:
-                    await self.haproxy.disable(region_id, active.slot)
+                # A failed candidate must never remove the last configured
+                # route. HAProxy health checks will still take a genuinely
+                # broken tunnel out of rotation after it is restored.
+                await self.haproxy.ready(region_id, active.slot)
             with suppress(GateError):
                 await self.worker.request(
                     DestroySlotRequest(

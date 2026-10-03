@@ -194,7 +194,7 @@ async def test_switch_rolls_back_when_stable_port_reaches_wrong_exit(
 
 
 @pytest.mark.asyncio
-async def test_failed_failover_keeps_unavailable_old_route_disabled(
+async def test_failed_failover_restores_unavailable_old_route(
     tmp_path: Path, encoded_profile: str
 ) -> None:
     database, discovery, node_id = await _seed(tmp_path, encoded_profile)
@@ -219,8 +219,7 @@ async def test_failed_failover_keeps_unavailable_old_route_disabled(
 
     region = await database.get_region("jp")
     assert region is not None and region.status == RegionStatus.UNAVAILABLE
-    assert ("ready", "jp", "a") not in haproxy.commands
-    assert haproxy.commands[-2:] == [("disable", "jp", "b"), ("disable", "jp", "a")]
+    assert haproxy.commands[-2:] == [("disable", "jp", "b"), ("ready", "jp", "a")]
     await database.close()
 
 
