@@ -22,7 +22,7 @@ rollback, Telegram confirmation and five-failure intervention alerts.
 - [x] Confirm switches; show stages/errors/rollback; retain SOCKS/TG/backup/account.
 - [x] Targeted event updates, background suspension, fallback polling and pagination.
 - [x] Regression tests, desktop/mobile visual and interaction verification, design docs.
-- [ ] Release/deploy to JP-AWS with backup/rollback and real authenticated SOCKS tests.
+- [x] Release/deploy to JP-AWS with backup/rollback and real authenticated SOCKS tests.
 - [ ] Collect full baseline and post-change 24h evidence; report measured reductions.
 
 Baseline read-only inspection: 7,326 active health probes, 252 candidate probes and
@@ -36,3 +36,11 @@ under 100 MiB/day where possible. VPS total reduction requires separate evidence
 wire totals, tunnel IP bytes, proxy payload and HTTP body bytes must not be summed.
 
 Idle disconnection remains opt-in and is not part of the default persistent service.
+
+Release validation (2026-10-07): `v0.1.12` is active on JP-AWS as
+`20261007-065711-a086cb1`; the installer created a rollback backup, all four Gate
+services are active, health live/ready checks return `200`, and all 11 enabled
+authenticated SOCKS entrances returned the same IP recorded for their active exit.
+The deployment backup is `/var/backups/gate/gate-20261007-065711-a086cb1-20261006-225751/`.
+The 24-hour traffic comparison remains open until the passive sampler has a full
+post-change window.
