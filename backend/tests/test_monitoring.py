@@ -67,6 +67,39 @@ async def test_independent_fallback_avoids_false_outage_when_cloudflare_is_down(
 
 
 @pytest.mark.asyncio
+async def test_independent_fallback_reaches_plain_ip_provider() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.host)
+        if request.url.host in {
+            "www.cloudflare.com",
+            "api.ipify.org",
+            "ipwho.is",
+        }:
+            return httpx.Response(503)
+        return httpx.Response(200, text="110.67.14.151\n")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await probe_socks_exit(
+            "127.0.0.1",
+            1,
+            expected_countries={"JP"},
+            full=False,
+            previous_ip="110.67.14.151",
+            client=client,
+        )
+
+    assert result.egress_ip == "110.67.14.151"
+    assert calls == [
+        "www.cloudflare.com",
+        "api.ipify.org",
+        "ipwho.is",
+        "ifconfig.me",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_detector_fault_is_distinct_from_unreachable_tunnel() -> None:
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(lambda _: httpx.Response(503))

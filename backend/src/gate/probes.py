@@ -77,13 +77,18 @@ async def probe_socks_exit(
         follow_redirects=False,
         trust_env=False,
     )
-    endpoints = ["cloudflare", "ipify", "ipwho"]
+    # Keep the normal health path to one request, but use independent providers
+    # when a route changes or the first detector is blocked by the exit.
+    endpoints = ["cloudflare", "ipify", "ipwho", "ifconfig", "icanhaz", "checkip"]
     if secondary_first:
         endpoints[:2] = ["ipify", "cloudflare"]
     urls = {
         "cloudflare": "https://www.cloudflare.com/cdn-cgi/trace",
         "ipify": "https://api.ipify.org?format=json",
         "ipwho": "https://ipwho.is/",
+        "ifconfig": "https://ifconfig.me/ip",
+        "icanhaz": "https://icanhazip.com/",
+        "checkip": "https://checkip.amazonaws.com/",
     }
     answers: list[tuple[str, str]] = []
     detector_failed = False
@@ -97,14 +102,16 @@ async def probe_socks_exit(
                     if endpoint == "cloudflare":
                         trace = parse_cloudflare_trace(payload.decode())
                         ip, country = trace.get("ip", ""), trace.get("loc", "").upper()
-                    else:
+                    elif endpoint in {"ipify", "ipwho"}:
                         value = json.loads(payload)
                         ip, country = str(value["ip"]), str(value.get("country_code", ""))
                         if endpoint == "ipify":
                             country = ""
+                    else:
+                        ip, country = payload.decode().strip(), ""
                     if not ipaddress.ip_address(ip).is_global:
                         raise ValueError("non-public egress address")
-                    if endpoint != "ipify" and not country:
+                    if endpoint in {"cloudflare", "ipwho"} and not country:
                         raise ValueError("missing country")
                 except (httpx.HTTPStatusError, ValueError, KeyError, TypeError):
                     detector_failed = True
