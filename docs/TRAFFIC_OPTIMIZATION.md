@@ -42,5 +42,5 @@ Release validation (2026-10-07): `v0.1.13` is active on JP-AWS as
 services are active, health live/ready checks return `200`, and all 11 enabled
 authenticated SOCKS entrances returned the same IP recorded for their active exit.
 The deployment backup is `/var/backups/gate/gate-20261007-071012-bf41a53-20261006-231051/`.
-The 24-hour traffic comparison remains open until the passive sampler has a full
-post-change window.
+The passive post-change window started at `2026-10-06T23:11:08Z` and reaches 24
+hours at `2026-10-07T23:11:08Z`; the traffic comparison remains open until then.
