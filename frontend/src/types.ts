@@ -161,3 +161,32 @@ export interface DiscoveryResult {
   observed_at: string;
   source_url: string;
 }
+
+export interface MonitoringPolicy {
+  health_interval_seconds: number;
+  full_verification_hours: number;
+  discovery_interval_minutes: number;
+  optimization_enabled: boolean;
+  failure_confirm_seconds: number;
+  probe_timeout_seconds: number;
+  max_concurrent_probes: number;
+  daily_budget_mib: number;
+  noise_guard_enabled: boolean;
+  noise_bytes_per_second: number;
+  noise_observation_seconds: number;
+  noise_confirmation_windows: number;
+  noise_switch_cooldown_minutes: number;
+}
+
+export interface TrafficSummary {
+  window: "today" | "24h" | "7d";
+  since: string;
+  until: string;
+  sources: Array<Record<string, string | number | null>>;
+  buckets: Array<Record<string, string | number | null>>;
+  budget: Record<string, string | number | boolean>;
+  collector: Record<string, unknown>;
+  collector_error: Record<string, unknown>;
+  layers_overlap: boolean;
+  notes: Record<string, string>;
+}

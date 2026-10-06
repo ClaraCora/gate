@@ -370,7 +370,7 @@ class LinuxNetworkManager:
                 "nameserver 1.1.1.1\nnameserver 1.0.0.1\noptions timeout:2 attempts:2\n",
                 0o644,
             )
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             await self._destroy_unlocked(spec)
             raise
 
@@ -544,7 +544,7 @@ class LinuxNetworkManager:
                 await self._start_openvpn(spec, request)
                 await self._start_socks(spec)
                 await self._wait_for_socks(spec)
-            except Exception:
+            except (Exception, asyncio.CancelledError):
                 await self._destroy_unlocked(spec)
                 raise
         return spec

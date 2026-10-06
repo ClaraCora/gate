@@ -65,6 +65,41 @@ class ProbeSequence:
         return self.results.pop(0)
 
 
+@pytest.mark.asyncio
+async def test_cancel_during_candidate_observation_preserves_active_route_and_cleans_target(
+    tmp_path: Path, encoded_profile: str
+) -> None:
+    database, discovery, node_id = await _seed(tmp_path, encoded_profile)
+    await database.complete_switch("jp", "a", node_id, "8.8.8.8")
+    worker, haproxy = FakeWorker(), FakeHaProxy()
+    coordinator = SwitchCoordinator(
+        database,
+        discovery,
+        worker=worker,
+        haproxy=haproxy,
+        probe=ProbeSequence(EgressProbe("8.8.4.4", "JP", 10)),
+    )
+    observing = asyncio.Event()
+
+    async def wait_for_noise(region_id: str, slot: str) -> None:
+        observing.set()
+        await asyncio.Event().wait()
+
+    coordinator.noise_guard = wait_for_noise
+    task = asyncio.create_task(coordinator.switch("jp", node_id))
+    await asyncio.wait_for(observing.wait(), timeout=2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    active = await database.get_active_slot("jp")
+    assert active is not None and active.slot == "a"
+    target = await database.get_slot("jp", "b")
+    assert target is not None and target.state == "empty"
+    assert ("ready", "jp", "a") in haproxy.commands
+    assert any(isinstance(r, DestroySlotRequest) and r.slot == "b" for r in worker.requests)
+    await database.close()
+
+
 async def _seed(tmp_path: Path, encoded_profile: str) -> tuple[Database, DiscoveryService, int]:
     database = Database(f"sqlite+aiosqlite:///{(tmp_path / 'coordinator.db').as_posix()}")
     settings = load_settings()

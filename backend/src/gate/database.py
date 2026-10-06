@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -239,10 +240,35 @@ class TelegramSettingsRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class RuntimeStateRecord(Base):
+    """Persist schedules and counter baselines separately from user credentials."""
+
+    __tablename__ = "runtime_state"
+    key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    value: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class TrafficRecord(Base):
+    __tablename__ = "traffic_samples"
+    __table_args__ = (Index("ix_traffic_time_scope", "observed_at", "scope"),)
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    scope: Mapped[str] = mapped_column(String(24))
+    source: Mapped[str] = mapped_column(String(128))
+    region_id: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    rx_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    tx_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    noise_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    requests: Mapped[int] = mapped_column(Integer, default=0)
+    seconds: Mapped[float] = mapped_column(Float, default=0)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class Database:
     def __init__(self, url: str) -> None:
         self.engine: AsyncEngine = create_async_engine(url)
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
+        self._runtime_lock = asyncio.Lock()
         if url.startswith("sqlite"):
             event.listen(self.engine.sync_engine, "connect", self._configure_sqlite)
 
@@ -252,6 +278,109 @@ class Database:
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.close()
+
+    async def get_runtime_state(self, key: str) -> dict[str, Any]:
+        async with self.sessions() as session:
+            record = await session.get(RuntimeStateRecord, key)
+            return dict(record.value) if record else {}
+
+    async def set_runtime_state(self, key: str, value: dict[str, Any]) -> None:
+        async with self._runtime_lock, self.sessions() as session, session.begin():
+            record = await session.get(RuntimeStateRecord, key)
+            if record is None:
+                session.add(RuntimeStateRecord(key=key, value=value))
+            else:
+                record.value = value
+                record.updated_at = utc_now()
+
+    async def record_traffic(self, **values: Any) -> None:
+        async with self.sessions() as session, session.begin():
+            session.add(TrafficRecord(**values))
+
+    async def record_traffic_counters(
+        self, counters: Sequence[dict[str, Any]], *, observed_at: datetime | None = None
+    ) -> None:
+        """Commit deltas and baselines together; never import lifetime counters as usage.
+
+        A new generation starts at zero coverage. Missing samples remain unknown.
+        Scope/source uniquely identifies a counter; identity changes on recreation.
+        """
+        observed_at = observed_at or utc_now()
+        timestamp = observed_at.timestamp()
+        async with self._runtime_lock, self.sessions() as session, session.begin():
+            for counter in counters:
+                key = f"counter:{counter['scope']}:{counter['source']}"
+                record = await session.get(RuntimeStateRecord, key)
+                previous = record.value if record else {}
+                current = dict(counter, timestamp=timestamp)
+                fields = ("rx_bytes", "tx_bytes", "noise_bytes")
+                continuous = (
+                    previous.get("identity") == current["identity"]
+                    and 0 < timestamp - previous.get("timestamp", timestamp) <= 180
+                    and all(current.get(k, 0) >= previous.get(k, 0) for k in fields)
+                )
+                if continuous:
+                    session.add(
+                        TrafficRecord(
+                            scope=current["scope"],
+                            source=current["source"],
+                            region_id=current.get("region_id"),
+                            observed_at=observed_at,
+                            seconds=timestamp - previous["timestamp"],
+                            **{k: current.get(k, 0) - previous.get(k, 0) for k in fields},
+                        )
+                    )
+                if record is None:
+                    session.add(RuntimeStateRecord(key=key, value=current))
+                else:
+                    record.value = current
+                    record.updated_at = observed_at
+
+    async def traffic_summary(self, since: datetime) -> list[dict[str, Any]]:
+        async with self.sessions() as session:
+            rows = await session.execute(
+                select(
+                    TrafficRecord.scope,
+                    TrafficRecord.source,
+                    TrafficRecord.region_id,
+                    func.sum(TrafficRecord.rx_bytes).label("rx_bytes"),
+                    func.sum(TrafficRecord.tx_bytes).label("tx_bytes"),
+                    func.sum(TrafficRecord.noise_bytes).label("noise_bytes"),
+                    func.sum(TrafficRecord.requests).label("requests"),
+                    func.sum(TrafficRecord.seconds).label("observed_seconds"),
+                    func.min(TrafficRecord.observed_at).label("first_sample"),
+                    func.max(TrafficRecord.observed_at).label("last_sample"),
+                )
+                .where(TrafficRecord.observed_at >= since)
+                .group_by(TrafficRecord.scope, TrafficRecord.source, TrafficRecord.region_id)
+            )
+            return [dict(row) for row in rows.mappings()]
+
+    async def prune_traffic(self) -> None:
+        async with self.sessions() as session, session.begin():
+            await session.execute(
+                delete(TrafficRecord).where(
+                    TrafficRecord.observed_at < utc_now() - timedelta(days=8)
+                )
+            )
+
+    async def traffic_buckets(self, since: datetime) -> list[dict[str, Any]]:
+        hour = func.strftime("%Y-%m-%dT%H:00:00Z", TrafficRecord.observed_at)
+        async with self.sessions() as session:
+            rows = await session.execute(
+                select(
+                    hour.label("hour"),
+                    TrafficRecord.scope,
+                    func.sum(TrafficRecord.rx_bytes).label("rx_bytes"),
+                    func.sum(TrafficRecord.tx_bytes).label("tx_bytes"),
+                    func.sum(TrafficRecord.noise_bytes).label("noise_bytes"),
+                    func.sum(TrafficRecord.requests).label("requests"),
+                )
+                .where(TrafficRecord.observed_at >= since)
+                .group_by(hour, TrafficRecord.scope)
+                .order_by(hour)
+            )
+            return [dict(row) for row in rows.mappings()]
 
     @staticmethod
     def _migrate_schema(connection: Any) -> None:
@@ -864,6 +993,27 @@ class Database:
             region = await session.get(RegionRecord, region_id)
             if region is None:
                 raise ValueError(f"unknown region: {region_id}")
+            sibling_conflict = await session.scalar(
+                select(RegionRecord.id).where(
+                    RegionRecord.group_id == region.group_id,
+                    RegionRecord.id != region_id,
+                    RegionRecord.active_egress_ip == egress_ip,
+                )
+            )
+            slot_conflict = await session.scalar(
+                select(RegionSlotRecord.region_id).where(
+                    RegionSlotRecord.region_id != region_id,
+                    RegionSlotRecord.state.in_(("active", "switching", "draining")),
+                    RegionSlotRecord.egress_ip == egress_ip,
+                    RegionSlotRecord.region_id.in_(
+                        select(RegionRecord.id).where(RegionRecord.group_id == region.group_id)
+                    ),
+                )
+            )
+            if sibling_conflict is not None or slot_conflict is not None:
+                raise ValueError(
+                    f"active exit conflicts with sibling entry: {sibling_conflict or slot_conflict}"
+                )
             region.active_egress_ip = egress_ip
             region.updated_at = utc_now()
 
@@ -901,12 +1051,14 @@ class Database:
         self,
         since: datetime,
         until: datetime,
+        after_id: int = 0,
     ) -> list[ProbeRunRecord]:
         async with self.sessions() as session:
             statement = (
                 select(ProbeRunRecord)
                 .where(
                     ProbeRunRecord.probe_type == "active_health",
+                    ProbeRunRecord.id > after_id,
                     ProbeRunRecord.finished_at.is_not(None),
                     ProbeRunRecord.finished_at >= since,
                     ProbeRunRecord.finished_at <= until,
@@ -1153,9 +1305,23 @@ class Database:
                 counts[name] = max(0, rowcount or 0)
             return counts
 
-    async def list_events(self, limit: int = 100) -> list[EventRecord]:
+    async def list_events(
+        self,
+        limit: int = 100,
+        *,
+        before_id: int | None = None,
+        region_id: str | None = None,
+        level: str | None = None,
+    ) -> list[EventRecord]:
         async with self.sessions() as session:
-            statement = select(EventRecord).order_by(EventRecord.created_at.desc()).limit(limit)
+            statement = select(EventRecord)
+            if before_id is not None:
+                statement = statement.where(EventRecord.id < before_id)
+            if region_id is not None:
+                statement = statement.where(EventRecord.region_id == region_id)
+            if level is not None:
+                statement = statement.where(EventRecord.level == level)
+            statement = statement.order_by(EventRecord.id.desc()).limit(limit)
             return list(await session.scalars(statement))
 
     async def latest_event_id(self) -> int:

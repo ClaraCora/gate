@@ -2,6 +2,13 @@
   "schemaVersion": 2,
   "generatedAt": "2026-09-02T07:20:03.7258032+08:00",
   "title": "Design System: Gate",
+  "redesignDirection": {
+    "world": "practical field notes",
+    "palette": "deep forest shell, warm paper surface, ink data, oxide rust action",
+    "navigation": ["exits", "traffic", "activity", "settings"],
+    "signature": "chronological health bands backed by real last-two-hour checks",
+    "responsive": "dense desktop list-detail, single-column mobile"
+  },
   "extensions": {
     "colorMeta": {
       "graphite-rail": {

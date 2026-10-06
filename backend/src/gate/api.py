@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request, Response, status
@@ -16,14 +16,20 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
 from gate import __version__
-from gate.config import GateSettings, SocksAuthConfig, TelegramConfig, load_settings
+from gate.config import (
+    GateSettings,
+    MonitoringPolicy,
+    SocksAuthConfig,
+    TelegramConfig,
+    load_settings,
+)
 from gate.controller import AutomationController
 from gate.coordinator import SwitchCoordinator
 from gate.database import Database, JobStatus, utc_now
 from gate.discovery import DiscoveryService
 from gate.domain import RegionMode
 from gate.errors import GateError
-from gate.probes import probe_socks_exit
+from gate.monitoring import MonitoringService
 from gate.schemas import (
     AutomationResponse,
     AutomationUpdateRequest,
@@ -89,14 +95,18 @@ def create_app(
         fallback_urls=app_settings.discovery.fallback_urls,
     )
     app_worker: WorkerGateway = worker or WorkerClient()
+    app_monitoring = MonitoringService(app_settings, app_database, app_worker)
     app_coordinator = coordinator or SwitchCoordinator(
         app_database,
         app_discovery,
         worker=app_worker,
         socks_auth=app_settings.socks_auth,
+        probe=app_monitoring.probe,
     )
     if isinstance(app_coordinator, SwitchCoordinator):
         app_coordinator.set_socks_auth(app_settings.socks_auth)
+        if coordinator is None:
+            app_coordinator.noise_guard = app_monitoring.observe_candidate
     app_worker_health = worker_health or WorkerClient(timeout_seconds=1.0)
     app_telegram = TelegramNotifier(app_settings.telegram)
     app_telegram_bot = TelegramBot(app_telegram)
@@ -106,6 +116,7 @@ def create_app(
         app_discovery,
         app_coordinator,
         notifier=app_telegram,
+        monitoring=app_monitoring,
     )
     app_sessions = SessionManager(
         app_settings.security,
@@ -132,6 +143,10 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await app_database.initialize(app_settings.regions)
+        stored_policy = await app_database.get_runtime_state("monitoring_policy")
+        if stored_policy:
+            app_settings.monitoring = MonitoringPolicy.model_validate(stored_policy)
+        await app_discovery.load_cache()
         stored_credentials = await app_database.get_security_credentials()
         if stored_credentials is not None:
             app_sessions.replace_credentials(*stored_credentials)
@@ -156,11 +171,15 @@ def create_app(
         telegram_task = asyncio.create_task(app_telegram_bot.run_forever())
         background_tasks.add(telegram_task)
         telegram_task.add_done_callback(background_tasks.discard)
+        traffic_task = asyncio.create_task(app_monitoring.run_forever())
+        background_tasks.add(traffic_task)
+        traffic_task.add_done_callback(background_tasks.discard)
         yield
         for task in background_tasks:
             task.cancel()
         if background_tasks:
             await asyncio.gather(*background_tasks, return_exceptions=True)
+        await app_automation.close()
         await app_database.close()
 
     app = FastAPI(
@@ -175,6 +194,7 @@ def create_app(
     app.state.discovery = app_discovery
     app.state.coordinator = app_coordinator
     app.state.automation = app_automation
+    app.state.monitoring = app_monitoring
     app.state.telegram_bot = app_telegram_bot
     app.state.worker = app_worker
     app.state.sessions = app_sessions
@@ -313,7 +333,7 @@ def create_app(
             detail={"message": "正在测试固定 SOCKS 端口"},
         )
         try:
-            result = await probe_socks_exit(
+            result = await app_monitoring.probe(
                 "127.0.0.1",
                 region.socks_port,
                 expected_countries=set(region.countries),
@@ -578,6 +598,78 @@ def create_app(
     async def get_automation() -> AutomationResponse:
         return AutomationResponse(enabled=app_automation.enabled)
 
+    @app.get("/api/v1/monitoring", response_model=MonitoringPolicy)
+    async def get_monitoring_policy() -> MonitoringPolicy:
+        return app_settings.monitoring
+
+    @app.put("/api/v1/monitoring", response_model=MonitoringPolicy)
+    async def update_monitoring_policy(payload: MonitoringPolicy) -> MonitoringPolicy:
+        await app_database.set_runtime_state("monitoring_policy", payload.model_dump())
+        app_settings.monitoring = payload
+        # Rebase only routine timers; active failure confirmation/recovery stays intact.
+        now = utc_now().timestamp()
+        for index, (region, _) in enumerate(await app_database.list_regions()):
+            state = await app_database.get_runtime_state(f"health:{region.id}")
+            if state and not state.get("failures"):
+                state["next_check"] = now + (index * 23) % payload.health_interval_seconds
+                state["next_full"] = min(
+                    state.get("next_full", now), now + payload.full_verification_hours * 3600
+                )
+                await app_database.set_runtime_state(f"health:{region.id}", state)
+        await app_database.set_runtime_state(
+            "discovery_schedule",
+            {
+                "next_refresh": now + payload.discovery_interval_minutes * 60,
+            },
+        )
+        await app_database.add_event(
+            code="MONITORING_POLICY_UPDATED", message="检测与流量策略已更新"
+        )
+        return payload
+
+    @app.get("/api/v1/traffic")
+    async def get_traffic(
+        window: Literal["today", "24h", "7d"] = "24h",
+        tz_offset_minutes: int = Query(default=0, ge=-840, le=840),
+    ) -> dict[str, Any]:
+        now = utc_now()
+        if window == "today":
+            local_now = now + timedelta(minutes=tz_offset_minutes)
+            since = local_now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(
+                minutes=tz_offset_minutes
+            )
+        else:
+            since = now - timedelta(hours=24 if window == "24h" else 168)
+        return {
+            "window": window,
+            "since": since,
+            "until": now,
+            "sources": await app_database.traffic_summary(since),
+            "buckets": await app_database.traffic_buckets(since),
+            "budget": await app_monitoring.budget_status(),
+            "collector": await app_database.get_runtime_state("traffic_status"),
+            "collector_error": await app_database.get_runtime_state("traffic_error"),
+            "layers_overlap": True,
+            "notes": {
+                "host": "默认路由网卡收发计数, 包含业务、检测和隧道封装",
+                "proxy": "代理 TCP 载荷, 包含本机检测与外部客户端, 不等于纯业务流量",
+                "tunnel": "隧道内 IP 字节; noise_bytes 是其中识别出的 DHCP/组播/广播",
+                "http": "检测和订阅 HTTP 响应体字节, 不含请求、TLS/TCP/隧道开销",
+            },
+        }
+
+    @app.get("/api/v1/monitoring/schedules")
+    async def get_monitoring_schedules() -> dict[str, Any]:
+        return {
+            region.id: {
+                "health": await app_database.get_runtime_state(f"health:{region.id}"),
+                "recovery": await app_database.get_runtime_state(f"recovery:{region.id}"),
+                "noise": await app_database.get_runtime_state(f"noise:{region.id}"),
+            }
+            for region, _ in await app_database.list_regions()
+            if region.enabled
+        }
+
     @app.get("/api/v1/settings/backup", response_model=SettingsBackupResponse)
     async def export_settings_backup() -> SettingsBackupResponse:
         settings = app_settings.model_dump(mode="json")
@@ -801,11 +893,13 @@ def create_app(
     @app.get("/api/v1/health-history", response_model=HealthHistoryResponse)
     async def health_history(
         hours: int = Query(default=2, ge=1, le=24),
+        after_id: int = Query(default=0, ge=0),
     ) -> HealthHistoryResponse:
         generated_at = utc_now()
         records = await app_database.list_active_health_probes(
             generated_at - timedelta(hours=hours),
             generated_at,
+            after_id=after_id,
         )
         return HealthHistoryResponse(
             window_hours=hours,
@@ -943,8 +1037,13 @@ def create_app(
     @app.get("/api/v1/events", response_model=list[EventResponse])
     async def list_events(
         limit: int = Query(default=100, ge=1, le=500),
+        before_id: int | None = Query(default=None, ge=1),
+        region_id: str | None = None,
+        level: Literal["info", "warning", "error"] | None = None,
     ) -> list[EventResponse]:
-        events = await app_database.list_events(limit)
+        events = await app_database.list_events(
+            limit, before_id=before_id, region_id=region_id, level=level
+        )
         return [EventResponse.model_validate(event) for event in events]
 
     @app.post(
@@ -1155,7 +1254,7 @@ def main() -> None:
         create_app(settings),
         host=settings.api.listen,
         port=settings.api.port,
-        timeout_graceful_shutdown=5,
+        timeout_graceful_shutdown=60,
     )
 
 

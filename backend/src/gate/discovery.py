@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 
 from gate.database import Database
-from gate.domain import FeedParseResult, SanitizedProfile
+from gate.domain import FeedParseResult, SanitizedProfile, Transport
 from gate.errors import ProfileRejectedError
+from gate.http_usage import usage_recorder
 from gate.profiles import sanitize_openvpn_profile
 from gate.vpngate import fetch_vpngate_feed_sources
 
@@ -39,6 +41,26 @@ class DiscoveryService:
         self.fetcher = fetcher
         self.profiles: dict[str, SanitizedProfile] = {}
         self.last_source_url = ""
+        self._refresh_lock = asyncio.Lock()
+        self._last_summary: DiscoverySummary | None = None
+
+    async def load_cache(self) -> None:
+        cached = await self.database.get_runtime_state("discovery_cache")
+        if not cached:
+            return
+        for value in cached.get("profiles", []):
+            profile = SanitizedProfile(**dict(value, transport=Transport(value["transport"])))
+            self.profiles[profile.fingerprint] = profile
+        summary = cached.get("summary")
+        if summary:
+            self._last_summary = DiscoverySummary(
+                **dict(
+                    summary,
+                    observed_at=datetime.fromisoformat(summary["observed_at"]),
+                    warnings=tuple(summary["warnings"]),
+                )
+            )
+            self.last_source_url = self._last_summary.source_url
 
     async def _fetch(self) -> FeedParseResult:
         if self.fetcher is not None:
@@ -48,11 +70,37 @@ class DiscoveryService:
         self.last_source_url = source_url
         return feed
 
-    async def refresh(self) -> DiscoverySummary:
+    async def refresh(self, *, minimum_interval: float = 0) -> DiscoverySummary:
+        requested_at = datetime.now(UTC)
+        async with self._refresh_lock:
+            if self._last_summary and (
+                self._last_summary.observed_at >= requested_at
+                or (requested_at - self._last_summary.observed_at).total_seconds()
+                < minimum_interval
+            ):
+                return self._last_summary
+
+            async def record(size: int) -> None:
+                await self.database.record_traffic(
+                    scope="http",
+                    source="discovery",
+                    rx_bytes=size,
+                    requests=1,
+                )
+
+            token = usage_recorder.set(record)
+            try:
+                self._last_summary = await self._refresh()
+                return self._last_summary
+            finally:
+                usage_recorder.reset(token)
+
+    async def _refresh(self) -> DiscoverySummary:
         feed = await self._fetch()
         accepted = []
         warnings = list(feed.warnings)
         rejected_profiles = 0
+        profiles: dict[str, SanitizedProfile] = {}
         for node in feed.nodes:
             try:
                 profile = sanitize_openvpn_profile(
@@ -65,7 +113,7 @@ class DiscoveryService:
                     warnings.append(f"{node.hostname} ({node.ip}): {exc}")
                 continue
             accepted.append((node, profile))
-            self.profiles[profile.fingerprint] = profile
+            profiles[profile.fingerprint] = profile
 
         observed_at = datetime.now(UTC)
         ingested = await self.database.ingest_nodes(accepted, observed_at)
@@ -77,6 +125,14 @@ class DiscoveryService:
             warnings=tuple(warnings),
             observed_at=observed_at,
             source_url=self.last_source_url,
+        )
+        self.profiles = profiles
+        await self.database.set_runtime_state(
+            "discovery_cache",
+            {
+                "profiles": [asdict(profile) for profile in profiles.values()],
+                "summary": dict(asdict(summary), observed_at=observed_at.isoformat()),
+            },
         )
         await self.database.add_event(
             code="DISCOVERY_COMPLETED",

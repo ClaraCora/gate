@@ -34,7 +34,7 @@ does not treat VPN Gate's public ranking as proof of local route quality.
 ## Operating Context
 
 - Development happens on Windows.
-- Production runs on the Debian VPS reached through the SSH alias `HK-Aliyun`.
+- Production runs on the Debian VPS reached through the SSH alias `JP-AWS`.
 - The operator reaches the WebUI and SOCKS ports through SSH local forwarding by default.
 - Routine work is repeated operational scanning: identify unhealthy regions, inspect
   candidates, test, switch, lock, and review the result or rollback reason.

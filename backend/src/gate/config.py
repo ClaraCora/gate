@@ -23,7 +23,7 @@ class DatabaseConfig(BaseModel):
 class DiscoveryConfig(BaseModel):
     url: str = "https://www.vpngate.net/api/iphone/"
     fallback_urls: tuple[str, ...] = ("https://r.jina.ai/http://www.vpngate.net/api/iphone/",)
-    interval_minutes: int = Field(default=10, ge=1, le=1440)
+    interval_minutes: int = Field(default=60, ge=1, le=1440)
     top_k_per_region: int = Field(default=5, ge=1, le=20)
 
 
@@ -36,9 +36,25 @@ class SelectionConfig(BaseModel):
 
 class AutomationConfig(BaseModel):
     enabled: bool = True
-    health_interval_seconds: int = Field(default=120, ge=30, le=3600)
+    health_interval_seconds: int = Field(default=300, ge=30, le=3600)
     optimization_interval_minutes: int = Field(default=30, ge=5, le=1440)
     max_candidates_per_cycle: int = Field(default=5, ge=1, le=5)
+
+
+class MonitoringPolicy(BaseModel):
+    health_interval_seconds: int = Field(default=300, ge=60, le=3600)
+    full_verification_hours: int = Field(default=6, ge=1, le=24)
+    discovery_interval_minutes: int = Field(default=60, ge=10, le=1440)
+    optimization_enabled: bool = False
+    failure_confirm_seconds: int = Field(default=10, ge=5, le=60)
+    probe_timeout_seconds: int = Field(default=12, ge=3, le=30)
+    max_concurrent_probes: int = Field(default=2, ge=1, le=4)
+    daily_budget_mib: int = Field(default=100, ge=10, le=4096)
+    noise_guard_enabled: bool = True
+    noise_bytes_per_second: int = Field(default=2048, ge=256, le=1048576)
+    noise_observation_seconds: int = Field(default=20, ge=10, le=60)
+    noise_confirmation_windows: int = Field(default=3, ge=2, le=10)
+    noise_switch_cooldown_minutes: int = Field(default=60, ge=30, le=1440)
 
 
 class TelegramConfig(BaseModel):
@@ -151,6 +167,7 @@ class GateSettings(BaseModel):
     discovery: DiscoveryConfig = DiscoveryConfig()
     selection: SelectionConfig = SelectionConfig()
     automation: AutomationConfig = AutomationConfig()
+    monitoring: MonitoringPolicy = MonitoringPolicy()
     telegram: TelegramConfig = TelegramConfig()
     security: SecurityConfig = SecurityConfig()
     socks_auth: SocksAuthConfig = SocksAuthConfig()

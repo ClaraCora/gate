@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import ipaddress
@@ -10,6 +11,7 @@ import httpx
 
 from gate.domain import FeedParseResult, VpnGateNode
 from gate.errors import FeedParseError
+from gate.http_usage import bounded_get
 
 DEFAULT_FEED_URL = "https://www.vpngate.net/api/iphone/"
 MAX_FEED_BYTES = 32 * 1024 * 1024
@@ -158,11 +160,12 @@ async def fetch_vpngate_feed(
         headers={"User-Agent": "Gate/0.1 (+https://github.com/ClaraCora/gate)"},
     )
     try:
-        response = await http_client.get(url)
-        response.raise_for_status()
-        if len(response.content) > MAX_FEED_BYTES:
-            raise FeedParseError("VPN Gate feed is larger than the configured limit")
-        return parse_vpngate_feed(response.text)
+        try:
+            async with asyncio.timeout(30):
+                body = await bounded_get(http_client, url, limit=MAX_FEED_BYTES)
+            return parse_vpngate_feed(body.decode("utf-8-sig"))
+        except (ValueError, TimeoutError) as exc:
+            raise FeedParseError("VPN Gate feed exceeded size/time limits") from exc
     finally:
         if owns_client:
             await http_client.aclose()

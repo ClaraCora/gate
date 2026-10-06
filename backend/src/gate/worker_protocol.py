@@ -22,6 +22,10 @@ class InspectRequest(WorkerRequest):
     action: Literal["inspect"]
 
 
+class TrafficRequest(WorkerRequest):
+    action: Literal["traffic"]
+
+
 class ProvisionSlotRequest(WorkerRequest):
     action: Literal["provision_slot"]
     region_id: str = Field(pattern=r"^[a-z][a-z0-9-]{0,15}$")
@@ -75,6 +79,7 @@ class UpdateSocksAuthRequest(WorkerRequest):
 Request = Annotated[
     HealthRequest
     | InspectRequest
+    | TrafficRequest
     | ProvisionSlotRequest
     | DestroySlotRequest
     | UpdateSocksAuthRequest,

@@ -6,6 +6,7 @@ import {
 import {
   Activity,
   ArrowLeftRight,
+  BarChart3,
   BellRing,
   CircleAlert,
   CircleCheck,
@@ -28,6 +29,7 @@ import {
   ShieldCheck,
   ShieldOff,
   ShieldUser,
+  Settings2,
   TriangleAlert,
   Waypoints,
   X,
@@ -53,6 +55,8 @@ import type {
   SocksListenAddress,
   SocksAuthState,
   TelegramSettings,
+  MonitoringPolicy,
+  TrafficSummary,
 } from "./types";
 
 const REGION_LABELS: Record<string, string> = {
@@ -219,17 +223,39 @@ export function useGateStream(enabled: boolean): StreamState {
     let refreshTimer: number | null = null;
     source.onopen = () => setState("live");
     source.onerror = () => setState("offline");
-    source.addEventListener("gate-event", () => {
+    source.addEventListener("gate-event", (rawEvent) => {
       if (refreshTimer !== null) return;
+      let eventCode = "";
+      let eventRegion: string | null = null;
+      if (rawEvent && "data" in rawEvent && typeof rawEvent.data === "string") {
+        try {
+          const payload = JSON.parse(rawEvent.data) as { code?: string; region_id?: string | null };
+          eventCode = payload.code ?? "";
+          eventRegion = payload.region_id ?? null;
+        } catch {
+          // A malformed event still gets the conservative refresh below.
+        }
+      }
       refreshTimer = window.setTimeout(() => {
         refreshTimer = null;
-        void queryClient.invalidateQueries({ queryKey: ["regions"] });
-        void queryClient.invalidateQueries({ queryKey: ["jobs"] });
+        const isTask = eventCode.includes("SWITCH") || eventCode.includes("PROBE") || eventCode.includes("RECOVERY") || eventCode.includes("RECONNECT");
+        if (!eventCode) {
+          void queryClient.invalidateQueries({ queryKey: ["regions"] });
+          void queryClient.invalidateQueries({ queryKey: ["jobs"] });
+          void queryClient.invalidateQueries({ queryKey: ["events"] });
+          void queryClient.invalidateQueries({ queryKey: ["slots"] });
+          void queryClient.invalidateQueries({ queryKey: ["automation"] });
+          void queryClient.invalidateQueries({ queryKey: ["socks-auth"] });
+          void queryClient.invalidateQueries({ queryKey: ["health-history"] });
+          return;
+        }
+        if (eventRegion || eventCode.includes("REGION") || eventCode.includes("HEALTH") || eventCode.includes("NOISE")) {
+          void queryClient.invalidateQueries({ queryKey: ["regions"] });
+          void queryClient.invalidateQueries({ queryKey: ["health-history"] });
+          void queryClient.invalidateQueries({ queryKey: ["traffic"] });
+        }
+        if (isTask) void queryClient.invalidateQueries({ queryKey: ["jobs"] });
         void queryClient.invalidateQueries({ queryKey: ["events"] });
-        void queryClient.invalidateQueries({ queryKey: ["slots"] });
-        void queryClient.invalidateQueries({ queryKey: ["automation"] });
-        void queryClient.invalidateQueries({ queryKey: ["socks-auth"] });
-        void queryClient.invalidateQueries({ queryKey: ["health-history"] });
       }, 500);
     });
     return () => {
@@ -387,8 +413,12 @@ export function HealthGrains({
   const endAt = Number.isFinite(parsedEnd) ? parsedEnd : Date.now();
   const bucketDuration = (windowHours * 3_600_000) / HEALTH_GRAIN_COUNT;
   const startAt = endAt - windowHours * 3_600_000;
+  const visibleChecks = checks.filter((check) => {
+    const finishedAt = Date.parse(check.finished_at);
+    return Number.isFinite(finishedAt) && finishedAt >= startAt && finishedAt <= endAt;
+  });
   const buckets = Array.from({ length: HEALTH_GRAIN_COUNT }, () => [] as HealthCheck[]);
-  for (const check of checks) {
+  for (const check of visibleChecks) {
     const finishedAt = Date.parse(check.finished_at);
     if (!Number.isFinite(finishedAt) || finishedAt < startAt || finishedAt > endAt) continue;
     const bucketIndex = Math.min(
@@ -397,8 +427,8 @@ export function HealthGrains({
     );
     buckets[bucketIndex].push(check);
   }
-  const succeeded = checks.filter((check) => check.result === "succeeded").length;
-  const failed = checks.filter((check) => check.result === "failed").length;
+  const succeeded = visibleChecks.filter((check) => check.result === "succeeded").length;
+  const failed = visibleChecks.filter((check) => check.result === "failed").length;
   const summary = loading
     ? "正在加载"
     : unavailable
@@ -1144,6 +1174,102 @@ export function TelegramSettingsDialog({
   );
 }
 
+function bytesLabel(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let amount = value;
+  let index = 0;
+  while (amount >= 1024 && index < units.length - 1) {
+    amount /= 1024;
+    index += 1;
+  }
+  return `${amount >= 10 || index === 0 ? amount.toFixed(0) : amount.toFixed(1)} ${units[index]}`;
+}
+
+function TrafficView({
+  traffic,
+  loading,
+  error,
+  onRetry,
+  onRange,
+}: {
+  traffic: TrafficSummary | undefined;
+  loading: boolean;
+  error: boolean;
+  onRetry: () => void;
+  onRange: (window: "today" | "24h" | "7d") => void;
+}) {
+  const totals = useMemo(() => {
+    const rows = traffic?.sources ?? [];
+    return rows.reduce<Record<string, { rx: number; tx: number; requests: number }>>((result, row) => {
+      const scope = String(row.scope ?? "unknown");
+      const current = result[scope] ?? { rx: 0, tx: 0, requests: 0 };
+      current.rx += Number(row.rx_bytes ?? 0);
+      current.tx += Number(row.tx_bytes ?? 0);
+      current.requests += Number(row.requests ?? 0);
+      result[scope] = current;
+      return result;
+    }, {});
+  }, [traffic]);
+  const cards = [
+    ["host", "主机网卡", "VPS 对外收发总量"],
+    ["proxy", "代理载荷", "SOCKS 前端累计"],
+    ["tunnel", "隧道内流量", "各隧道 IP 字节"],
+    ["http", "检测响应体", "检测与订阅响应体"],
+  ] as const;
+  return (
+    <main className="data-page" aria-labelledby="traffic-title">
+      <div className="page-intro">
+        <div><span className="eyebrow">MEASURED TRAFFIC</span><h1 id="traffic-title">流量账本</h1><p>把 VPS 账单流量拆成不同计量层，避免把重叠数据相加。</p></div>
+        <div className="range-switcher" role="group" aria-label="流量时间范围">
+          {(["today", "24h", "7d"] as const).map((window) => <button className={traffic?.window === window ? "is-active" : ""} key={window} onClick={() => onRange(window)} type="button">{window === "today" ? "今天" : window === "24h" ? "24 小时" : "7 天"}</button>)}
+        </div>
+      </div>
+      {error ? <div className="inline-error" role="alert"><CircleAlert size={18} /><span>流量采集暂时不可用</span><button className="button button--secondary" onClick={onRetry} type="button"><RefreshCw size={15} />重试</button></div> : null}
+      <section className="ledger-grid" aria-label="流量分层">
+        {cards.map(([scope, label, detail]) => {
+          const value = totals[scope];
+          return <article className="ledger-card" key={scope}><div className="ledger-card__top"><span>{label}</span><span className="ledger-scope">{scope}</span></div><strong>{loading ? "…" : bytesLabel((value?.rx ?? 0) + (value?.tx ?? 0))}</strong><p>{detail}</p><small>收 {bytesLabel(value?.rx ?? 0)} · 发 {bytesLabel(value?.tx ?? 0)}</small></article>;
+        })}
+      </section>
+      <section className="traffic-lower-grid">
+        <article className="data-panel"><div className="panel-heading"><div><h2>按来源</h2><p>每行只属于一个层，不进行层间求和。</p></div><span>{traffic?.since ? formatTime(traffic.since) : "--"}</span></div><div className="traffic-source-list">{(traffic?.sources ?? []).length === 0 ? <div className="empty-state"><BarChart3 size={24} /><strong>还没有采样数据</strong><span>采集器启动后会在这里显示。</span></div> : (traffic?.sources ?? []).slice().sort((a, b) => Number(b.rx_bytes ?? 0) - Number(a.rx_bytes ?? 0)).slice(0, 12).map((row, index) => <div className="traffic-source-row" key={`${String(row.scope)}-${String(row.source)}-${index}`}><div><strong>{String(row.source ?? "未知")}</strong><span>{String(row.scope ?? "unknown")}{row.region_id ? ` · ${String(row.region_id)}` : ""}</span></div><b>{bytesLabel(Number(row.rx_bytes ?? 0) + Number(row.tx_bytes ?? 0))}</b></div>)}</div></article>
+        <article className="data-panel budget-panel"><div className="panel-heading"><div><h2>检测预算</h2><p>软上限只暂停可选工作，不阻断故障恢复。</p></div><Gauge size={20} /></div><div className="budget-number">{bytesLabel(Number(traffic?.budget?.estimated_diagnostic_bytes ?? 0))}</div><div className="budget-meta"><span>软上限</span><strong>{bytesLabel(Number(traffic?.budget?.budget_bytes ?? 0))}</strong></div><div className={`budget-state ${traffic?.budget?.optional_work_paused ? "is-paused" : ""}`}>{traffic?.budget?.optional_work_paused ? "可选检测已暂停" : "可选检测正常"}</div><p className="data-note">{traffic?.notes?.host ?? "采样覆盖范围尚未报告"}</p></article>
+      </section>
+      <p className="disclaimer"><CircleAlert size={14} />主机、代理、隧道和 HTTP 是重叠观测层，不能直接相加。未知或重启间隔会单独标示。</p>
+    </main>
+  );
+}
+
+function MonitoringSettingsView({
+  policy,
+  loading,
+  saving,
+  onSave,
+}: {
+  policy: MonitoringPolicy | undefined;
+  loading: boolean;
+  saving: boolean;
+  onSave: (policy: MonitoringPolicy) => void;
+}) {
+  const [draft, setDraft] = useState<MonitoringPolicy | null>(policy ?? null);
+  useEffect(() => { if (policy) setDraft(policy); }, [policy]);
+  if (loading || !draft) return <main className="data-page"><SkeletonRows count={5} /></main>;
+  const update = <K extends keyof MonitoringPolicy>(key: K, value: MonitoringPolicy[K]) => setDraft({ ...draft, [key]: value });
+  return <main className="data-page settings-page" aria-labelledby="settings-title">
+    <div className="page-intro"><div><span className="eyebrow">CONTROL PLANE</span><h1 id="settings-title">检测与控制</h1><p>调整周期、预算和噪声防护。保存后会持久化到服务端。</p></div><button className="button button--primary" disabled={saving} onClick={() => onSave(draft)} type="button">{saving ? <LoaderCircle className="spin" size={16} /> : <Settings2 size={16} />}{saving ? "保存中" : "保存策略"}</button></div>
+    <section className="settings-grid">
+      <article className="data-panel settings-panel"><div className="panel-heading"><div><h2>健康检查</h2><p>轻量检查保持在较低频率，完整验证按需执行。</p></div><ShieldCheck size={20} /></div><label className="setting-field"><span>轻量检查间隔（秒）</span><input min="60" max="3600" type="number" value={draft.health_interval_seconds} onChange={(event) => update("health_interval_seconds", Number(event.target.value))} /></label><label className="setting-field"><span>完整验证间隔（小时）</span><input min="1" max="48" type="number" value={draft.full_verification_hours} onChange={(event) => update("full_verification_hours", Number(event.target.value))} /></label><label className="setting-field"><span>检测超时（秒）</span><input min="3" max="60" type="number" value={draft.probe_timeout_seconds} onChange={(event) => update("probe_timeout_seconds", Number(event.target.value))} /></label><label className="setting-field"><span>并发检测数</span><input min="1" max="8" type="number" value={draft.max_concurrent_probes} onChange={(event) => update("max_concurrent_probes", Number(event.target.value))} /></label></article>
+      <article className="data-panel settings-panel"><div className="panel-heading"><div><h2>流量与噪声</h2><p>识别持续 DHCP/广播开销，保护正常线路。</p></div><Activity size={20} /></div><label className="setting-field"><span>每日软预算（MiB）</span><input min="10" max="2048" type="number" value={draft.daily_budget_mib} onChange={(event) => update("daily_budget_mib", Number(event.target.value))} /></label><label className="setting-field setting-toggle"><span>启用噪声防护</span><input checked={draft.noise_guard_enabled} type="checkbox" onChange={(event) => update("noise_guard_enabled", event.target.checked)} /></label><label className="setting-field"><span>噪声阈值（bytes/s）</span><input min="256" max="1048576" type="number" value={draft.noise_bytes_per_second} onChange={(event) => update("noise_bytes_per_second", Number(event.target.value))} /></label><label className="setting-field"><span>确认窗口数</span><input min="2" max="8" type="number" value={draft.noise_confirmation_windows} onChange={(event) => update("noise_confirmation_windows", Number(event.target.value))} /></label></article>
+      <article className="data-panel settings-panel settings-panel--wide"><div className="panel-heading"><div><h2>凭据与通知</h2><p>这些入口继续使用原有安全对话框。</p></div><BellRing size={20} /></div><div className="settings-actions"><button className="button button--secondary" type="button" onClick={() => window.dispatchEvent(new CustomEvent("gate:open-socks"))}><ShieldUser size={16} />SOCKS 接入</button><button className="button button--secondary" type="button" onClick={() => window.dispatchEvent(new CustomEvent("gate:open-telegram"))}><BellRing size={16} />Telegram 通知</button><button className="button button--secondary" type="button" onClick={() => window.dispatchEvent(new CustomEvent("gate:backup"))}><Download size={16} />导出备份</button></div></article>
+    </section>
+  </main>;
+}
+
+function ConfirmSwitchDialog({ region, busy, onCancel, onConfirm }: { region: Region | null; busy: boolean; onCancel: () => void; onConfirm: () => void }) {
+  return <dialog className="confirm-dialog" open={Boolean(region)} aria-labelledby="confirm-switch-title"><div className="confirm-dialog__icon"><ArrowLeftRight size={20} /></div><h2 id="confirm-switch-title">确认切换出口？</h2><p>{region ? `${entryLabel(region)} 当前出口为 ${region.active_egress_ip ?? "未分配"}。系统将随机抽取最多 5 个未失败候选，并在验证失败时回滚。` : ""}</p><div className="dialog-actions"><button className="button button--secondary" disabled={busy} onClick={onCancel} type="button">取消</button><button className="button button--primary" disabled={busy} onClick={onConfirm} type="button">{busy ? <LoaderCircle className="spin" size={16} /> : <ArrowLeftRight size={16} />}{busy ? "提交中" : "确认切换"}</button></div></dialog>;
+}
+
 function ConsoleView({
   session,
   onLogout,
@@ -1159,26 +1285,30 @@ function ConsoleView({
   const [passwordOpen, setPasswordOpen] = useState(false);
   const [socksAuthOpen, setSocksAuthOpen] = useState(false);
   const [telegramOpen, setTelegramOpen] = useState(false);
+  const [switchTarget, setSwitchTarget] = useState<Region | null>(null);
+  const [trafficWindow, setTrafficWindow] = useState<"today" | "24h" | "7d">("24h");
   const [notice, setNotice] = useState<string | null>(null);
   const streamState = useGateStream(session.authenticated);
   const automationQuery = useQuery({ queryKey: ["automation"], queryFn: gateApi.automation });
   const socksAuthQuery = useQuery({ queryKey: ["socks-auth"], queryFn: gateApi.socksAuth });
-  const regionsQuery = useQuery({ queryKey: ["regions"], queryFn: gateApi.regions, refetchInterval: 10_000 });
+  const regionsQuery = useQuery({ queryKey: ["regions"], queryFn: gateApi.regions, refetchInterval: 15_000 });
   const healthHistoryQuery = useQuery({
     queryKey: ["health-history", 2],
     queryFn: () => gateApi.healthHistory(2),
-    refetchInterval: 30_000,
+    refetchInterval: 60_000,
     retry: false,
   });
-  const slotsQuery = useQuery({ queryKey: ["slots"], queryFn: gateApi.slots, refetchInterval: 10_000, retry: false });
-  const jobsQuery = useQuery({ queryKey: ["jobs"], queryFn: gateApi.jobs, refetchInterval: 5_000 });
-  const eventsQuery = useQuery({ queryKey: ["events"], queryFn: gateApi.events, refetchInterval: 15_000 });
+  const slotsQuery = useQuery({ queryKey: ["slots"], queryFn: gateApi.slots, refetchInterval: 30_000, retry: false });
+  const jobsQuery = useQuery({ queryKey: ["jobs"], queryFn: gateApi.jobs, refetchInterval: 10_000 });
+  const eventsQuery = useQuery({ queryKey: ["events"], queryFn: gateApi.events, refetchInterval: 30_000 });
+  const trafficQuery = useQuery({ queryKey: ["traffic", trafficWindow], queryFn: () => gateApi.traffic(trafficWindow), refetchInterval: 60_000, enabled: params.get("view") === "traffic" });
+  const monitoringQuery = useQuery({ queryKey: ["monitoring"], queryFn: gateApi.monitoring, refetchInterval: false, enabled: params.get("view") === "settings" });
   const regions = regionsQuery.data ?? [];
   const jobs = jobsQuery.data ?? [];
   const slots = slotsQuery.data ?? [];
   const selectedId = params.get("region") ?? regions[0]?.id ?? null;
   const requestedView = params.get("view");
-  const view = requestedView === "jobs" || requestedView === "events" ? requestedView : "routes";
+  const view = requestedView === "jobs" || requestedView === "events" || requestedView === "traffic" || requestedView === "settings" ? requestedView : "routes";
   const selectedRegion = regions.find((region) => region.id === selectedId) ?? null;
   const activeJob = jobs.find((job) => job.region_id === selectedId && ["queued", "running"].includes(job.status));
   const selectedSlots = slots.filter((slot) => slot.region_id === selectedId);
@@ -1225,9 +1355,17 @@ function ConsoleView({
   const switchMutation = useMutation({
     mutationFn: gateApi.switchRegion,
     onSuccess: () => {
+      setSwitchTarget(null);
       setNotice("出口切换任务已提交；系统将按排除记录随机尝试候选线路");
       void queryClient.invalidateQueries({ queryKey: ["jobs"] });
       void queryClient.invalidateQueries({ queryKey: ["regions"] });
+    },
+  });
+  const monitoringMutation = useMutation({
+    mutationFn: gateApi.updateMonitoring,
+    onSuccess: (policy) => {
+      queryClient.setQueryData(["monitoring"], policy);
+      setNotice("检测策略已保存");
     },
   });
   const cancelMutation = useMutation({
@@ -1266,13 +1404,26 @@ function ConsoleView({
       setNotice("设置备份已下载（敏感凭据已排除）");
     },
   });
+  useEffect(() => {
+    const openSocks = () => setSocksAuthOpen(true);
+    const openTelegram = () => setTelegramOpen(true);
+    const exportBackup = () => backupMutation.mutate();
+    window.addEventListener("gate:open-socks", openSocks);
+    window.addEventListener("gate:open-telegram", openTelegram);
+    window.addEventListener("gate:backup", exportBackup);
+    return () => {
+      window.removeEventListener("gate:open-socks", openSocks);
+      window.removeEventListener("gate:open-telegram", openTelegram);
+      window.removeEventListener("gate:backup", exportBackup);
+    };
+  }, [backupMutation]);
 
-  const mutationError = refreshMutation.error ?? probeMutation.error ?? modeMutation.error ?? reconnectMutation.error ?? switchMutation.error ?? cancelMutation.error ?? automationMutation.error ?? backupMutation.error;
+  const mutationError = refreshMutation.error ?? probeMutation.error ?? modeMutation.error ?? reconnectMutation.error ?? switchMutation.error ?? cancelMutation.error ?? automationMutation.error ?? backupMutation.error ?? monitoringMutation.error;
   const enabledRegions = useMemo(() => regions.filter((region) => region.mode !== "disabled"), [regions]);
   const liveRegions = useMemo(() => enabledRegions.filter((region) => region.status === "healthy").length, [enabledRegions]);
   const runningJobs = useMemo(() => jobs.filter((job) => ["queued", "running"].includes(job.status)).length, [jobs]);
   const selectRegion = (id: string) => setParams((current) => { current.set("region", id); current.set("view", "routes"); return current; });
-  const selectView = (value: "routes" | "jobs" | "events") => {
+  const selectView = (value: "routes" | "jobs" | "events" | "traffic" | "settings") => {
     setParams((current) => { current.set("view", value); return current; });
   };
   const toggleRegion = (region: Region) => {
@@ -1289,8 +1440,10 @@ function ConsoleView({
         <div className="brand-lockup brand-lockup--bar"><span className="brand-mark"><Network size={20} /></span><span>GATE</span><small>出口控制台</small></div>
         <nav aria-label="主导航" className="primary-nav">
           <button aria-current={view === "routes" ? "page" : undefined} onClick={() => selectView("routes")} type="button"><Waypoints size={16} />出口</button>
+          <button aria-current={view === "traffic" ? "page" : undefined} onClick={() => selectView("traffic")} type="button"><BarChart3 size={16} />流量</button>
           <button aria-current={view === "jobs" ? "page" : undefined} onClick={() => selectView("jobs")} type="button"><ListTodo size={16} />任务{runningJobs > 0 ? <span>{runningJobs}</span> : null}</button>
           <button aria-current={view === "events" ? "page" : undefined} onClick={() => selectView("events")} type="button"><Activity size={16} />事件</button>
+          <button aria-current={view === "settings" ? "page" : undefined} onClick={() => selectView("settings")} type="button"><Settings2 size={16} />设置</button>
         </nav>
         <div className="command-actions">
           <button className="button button--dark" disabled={refreshMutation.isPending} onClick={() => refreshMutation.mutate()} type="button">{refreshMutation.isPending ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}{refreshMutation.isPending ? "正在发现" : "刷新节点"}</button>
@@ -1326,9 +1479,13 @@ function ConsoleView({
                   <div className="section-heading"><div><h1 id="routes-title">地区入口</h1><p>同一地区可开启多个固定端口，每个端口使用互不重复的真实出口。</p></div><span className="last-sync"><Clock3 size={14} />{formatTime(regions[0]?.updated_at)}</span></div>
                   <RegionTable healthHistory={healthHistoryQuery.data} healthHistoryLoading={healthHistoryQuery.isLoading} healthHistoryUnavailable={healthHistoryQuery.isError} jobs={jobs} listen={socksAuthQuery.data?.listen ?? "127.0.0.1"} modePendingRegionId={modeMutation.isPending ? modeMutation.variables?.regionId ?? null : null} onSelect={selectRegion} onToggle={toggleRegion} regions={regions} runtimeUnavailable={slotsQuery.isError} selectedId={selectedId} slots={slots} />
                 </section>
-                {selectedRegion ? <RegionInspector activeJob={activeJob} listen={socksAuthQuery.data?.listen ?? "127.0.0.1"} modePending={modeMutation.isPending && modeMutation.variables?.regionId === selectedRegion.id} onMode={(mode) => modeMutation.mutate({ regionId: selectedRegion.id, mode })} onProbe={() => probeMutation.mutate(selectedRegion.id)} onReconnect={() => reconnectMutation.mutate(selectedRegion.id)} onSwitch={() => switchMutation.mutate(selectedRegion.id)} onToggle={() => toggleRegion(selectedRegion)} probePending={probeMutation.isPending} reconnectPending={reconnectMutation.isPending} switchPending={switchMutation.isPending} region={selectedRegion} runtimeUnavailable={slotsQuery.isError} slots={selectedSlots} /> : null}
+                {selectedRegion ? <RegionInspector activeJob={activeJob} listen={socksAuthQuery.data?.listen ?? "127.0.0.1"} modePending={modeMutation.isPending && modeMutation.variables?.regionId === selectedRegion.id} onMode={(mode) => modeMutation.mutate({ regionId: selectedRegion.id, mode })} onProbe={() => probeMutation.mutate(selectedRegion.id)} onReconnect={() => reconnectMutation.mutate(selectedRegion.id)} onSwitch={() => setSwitchTarget(selectedRegion)} onToggle={() => toggleRegion(selectedRegion)} probePending={probeMutation.isPending} reconnectPending={reconnectMutation.isPending} switchPending={switchMutation.isPending} region={selectedRegion} runtimeUnavailable={slotsQuery.isError} slots={selectedSlots} /> : null}
               </main>
             </>
+          ) : view === "traffic" ? (
+            <TrafficView error={trafficQuery.isError} loading={trafficQuery.isLoading} onRange={setTrafficWindow} onRetry={() => void trafficQuery.refetch()} traffic={trafficQuery.data} />
+          ) : view === "settings" ? (
+            <MonitoringSettingsView loading={monitoringQuery.isLoading} onSave={(policy) => monitoringMutation.mutate(policy)} policy={monitoringQuery.data} saving={monitoringMutation.isPending} />
           ) : view === "jobs" ? (
             <main className="activity-page" aria-labelledby="jobs-title">
               <div className="section-heading"><div><h1 id="jobs-title">控制任务</h1><p>查看测试、切换和自动维护的执行结果。</p></div><span className="record-count">{jobs.length} 条记录</span></div>
@@ -1343,6 +1500,7 @@ function ConsoleView({
         </>
       )}
       <DisableRegionDialog busy={modeMutation.isPending && modeMutation.variables?.mode === "disabled"} onCancel={() => setDisableTarget(null)} onConfirm={() => { if (disableTarget) modeMutation.mutate({ regionId: disableTarget.id, mode: "disabled" }); }} region={disableTarget} />
+      <ConfirmSwitchDialog busy={switchMutation.isPending} onCancel={() => setSwitchTarget(null)} onConfirm={() => { if (switchTarget) switchMutation.mutate(switchTarget.id); }} region={switchTarget} />
       <SocksAuthDialog onChanged={(state) => { setSocksAuthOpen(false); setNotice(`SOCKS 已监听 ${state.listen}；${state.enabled ? `统一用户名为 ${state.username}` : "认证已关闭"}`); void queryClient.invalidateQueries({ queryKey: ["events"] }); }} onClose={() => setSocksAuthOpen(false)} open={socksAuthOpen} />
       <TelegramSettingsDialog onChanged={(settings) => { setTelegramOpen(false); setNotice(settings.enabled ? "Telegram 通知设置已保存" : "Telegram 通知已关闭"); void queryClient.invalidateQueries({ queryKey: ["events"] }); }} onClose={() => setTelegramOpen(false)} open={telegramOpen} />
       <ChangePasswordDialog onChanged={(updatedSession) => { onSessionChange(updatedSession); setPasswordOpen(false); setNotice("管理密码已修改，其他登录会话已失效"); void queryClient.invalidateQueries({ queryKey: ["events"] }); }} onClose={() => setPasswordOpen(false)} open={passwordOpen} />

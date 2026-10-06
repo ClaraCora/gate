@@ -79,6 +79,17 @@ components:
 
 # Design System: Gate
 
+## 2026 Console Direction
+
+The redesigned console uses a practical field-notes palette: deep forest command rail, warm
+paper reading surface, ink-blue data readouts, and oxide-rust action signals. The primary
+navigation is organized as Exits, Traffic, Activity, and Settings. Desktop uses a dense list
+and detail workbench; mobile collapses to one readable column. The signature interaction is the
+chronological health band backed by the last two hours of real checks, with actual exit IP as the
+primary value and node IP as secondary context. Unallocated and disabled routes stay out of the
+default scan, while enabled failures remain visible. Traffic views label host, proxy, tunnel,
+and HTTP layers as overlapping measurements and never present their sum as a single total.
+
 ## Overview
 
 **Creative North Star: "The Regional Calibration Bench"**

@@ -14,6 +14,8 @@ import type {
   SocksAuthUpdate,
   TelegramSettings,
   TelegramSettingsUpdate,
+  MonitoringPolicy,
+  TrafficSummary,
 } from "./types";
 
 let csrfToken: string | null = null;
@@ -103,6 +105,11 @@ export const gateApi = {
       body: JSON.stringify({ enabled }),
     }),
   telegram: () => request<TelegramSettings>("/api/v1/telegram"),
+  monitoring: () => request<MonitoringPolicy>("/api/v1/monitoring"),
+  updateMonitoring: (policy: MonitoringPolicy) =>
+    request<MonitoringPolicy>("/api/v1/monitoring", { method: "PUT", body: JSON.stringify(policy) }),
+  traffic: (window: "today" | "24h" | "7d" = "24h") =>
+    request<TrafficSummary>(`/api/v1/traffic?window=${window}&tz_offset_minutes=${-new Date().getTimezoneOffset()}`),
   updateTelegram: (update: TelegramSettingsUpdate) =>
     request<TelegramSettings>("/api/v1/telegram", {
       method: "PUT",

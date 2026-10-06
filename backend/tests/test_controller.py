@@ -170,6 +170,9 @@ async def test_optimization_requires_two_measured_improvement_rounds(
     settings = load_settings().model_copy(
         update={
             "database": DatabaseConfig(url=f"sqlite+aiosqlite:///{tmp_path / 'optimize.db'}"),
+            "monitoring": load_settings().monitoring.model_copy(
+                update={"optimization_enabled": True}
+            ),
             "selection": SelectionConfig(
                 improvement_ratio=1.15,
                 confirmation_rounds=2,

@@ -12,13 +12,17 @@ from gate.discovery import DiscoveryService
 from gate.domain import RegionMode, RegionStatus
 from gate.errors import GateError
 from gate.haproxy import HaProxyRuntime
-from gate.probes import EgressProbe, probe_socks_exit
+from gate.probes import DetectorError, EgressProbe, probe_socks_exit
 from gate.worker_client import WorkerClient
 from gate.worker_protocol import DestroySlotRequest, InspectRequest, ProvisionSlotRequest, Request
 
 
 class SwitchError(GateError):
     code = "SWITCH_FAILED"
+
+
+class SwitchBusyError(SwitchError):
+    code = "SWITCH_BUSY"
 
 
 class WorkerGateway(Protocol):
@@ -79,6 +83,7 @@ class SwitchCoordinator:
         self._region_locks: dict[str, asyncio.Lock] = {}
         self._group_locks: dict[str, asyncio.Lock] = {}
         self._cleanup_tasks: set[asyncio.Task[None]] = set()
+        self.noise_guard: Callable[[str, str], Awaitable[None]] | None = None
 
     def set_socks_auth(self, auth: SocksAuthConfig) -> None:
         self._socks_auth = auth
@@ -176,6 +181,15 @@ class SwitchCoordinator:
                         1080,
                         expected_countries=set(region.countries),
                     )
+                except DetectorError:
+                    await self.haproxy.ready(record.region_id, record.slot)
+                    await self.database.add_event(
+                        code="RECONCILE_DETECTOR_UNAVAILABLE",
+                        level="warning",
+                        message=f"{region.name} 的检测服务暂不可用, 保留已验证隧道等待复核",
+                        region_id=record.region_id,
+                    )
+                    continue
                 except Exception as exc:
                     await self.haproxy.disable(record.region_id, record.slot)
                     with suppress(GateError):
@@ -276,9 +290,9 @@ class SwitchCoordinator:
         group_lock = self._group_locks.setdefault(region.group_id, asyncio.Lock())
         region_lock = self._region_locks.setdefault(region_id, asyncio.Lock())
         if group_lock.locked():
-            raise SwitchError(f"同地区已有切换任务正在运行: {region.group_id}")
+            raise SwitchBusyError(f"同地区已有切换任务正在运行: {region.group_id}")
         if region_lock.locked():
-            raise SwitchError(f"此入口已有任务正在运行: {region_id}")
+            raise SwitchBusyError(f"此入口已有任务正在运行: {region_id}")
         async with group_lock, region_lock:
             return await self._switch(region_id, node_id, progress=progress)
 
@@ -295,9 +309,9 @@ class SwitchCoordinator:
         group_lock = self._group_locks.setdefault(region.group_id, asyncio.Lock())
         lock = self._region_locks.setdefault(region_id, asyncio.Lock())
         if group_lock.locked():
-            raise SwitchError(f"同地区已有任务正在运行: {region.group_id}")
+            raise SwitchBusyError(f"同地区已有任务正在运行: {region.group_id}")
         if lock.locked():
-            raise SwitchError(f"an operation is already running for region: {region_id}")
+            raise SwitchBusyError(f"an operation is already running for region: {region_id}")
         async with group_lock, lock:
             return await self._probe_candidate(region_id, node_id, progress=progress)
 
@@ -344,6 +358,8 @@ class SwitchCoordinator:
                 1080,
                 expected_countries=set(region.countries),
             )
+            if self.noise_guard is not None:
+                await self.noise_guard(region_id, target_slot)
             conflict = await self.database.get_active_conflict(
                 region_id,
                 node_id=node_id,
@@ -435,6 +451,7 @@ class SwitchCoordinator:
         previous_status = RegionStatus(region.status)
         target_slot = self._target_slot(active)
         target_enabled = False
+        committed = False
 
         await self.database.set_region_status(region_id, RegionStatus.SWITCHING)
         await report(0.05, "正在准备备用隧道")
@@ -462,6 +479,9 @@ class SwitchCoordinator:
                 1080,
                 expected_countries=set(region.countries),
             )
+            if self.noise_guard is not None:
+                await report(0.55, "正在观察候选隧道的持续广播开销")
+                await self.noise_guard(region_id, target_slot)
             await self.database.set_slot_egress_ip(region_id, target_slot, direct_probe.egress_ip)
 
             conflict = await self.database.get_active_conflict(
@@ -487,12 +507,23 @@ class SwitchCoordinator:
             if stable_probe.egress_ip != direct_probe.egress_ip:
                 raise SwitchError("stable SOCKS port reached a different exit than the candidate")
 
-            await self.database.complete_switch(
-                region_id,
-                target_slot,
-                node_id,
-                stable_probe.egress_ip,
+            commit = asyncio.create_task(
+                self.database.complete_switch(
+                    region_id,
+                    target_slot,
+                    node_id,
+                    stable_probe.egress_ip,
+                )
             )
+            try:
+                await asyncio.shield(commit)
+            except asyncio.CancelledError:
+                await commit
+                committed = True
+                if active is not None:
+                    self._schedule_drain_cleanup(region_id, cast(Literal["a", "b"], active.slot))
+                raise
+            committed = True
             if active is not None:
                 self._schedule_drain_cleanup(
                     region_id,
@@ -520,7 +551,9 @@ class SwitchCoordinator:
                 country_code=stable_probe.country_code,
                 latency_ms=stable_probe.latency_ms,
             )
-        except Exception as exc:
+        except (Exception, asyncio.CancelledError) as exc:
+            if committed:
+                raise  # The verified new route is already the committed DB state.
             if target_enabled:
                 await self.haproxy.disable(region_id, target_slot)
             if active is not None:

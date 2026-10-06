@@ -16,6 +16,7 @@ def render_haproxy_config(settings: GateSettings) -> str:
         "",
         "defaults",
         "    mode tcp",
+        "    option contstats",
         "    timeout connect 5s",
         "    timeout client 1h",
         "    timeout server 1h",

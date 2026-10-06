@@ -21,6 +21,7 @@ from gate.worker_protocol import (
     InspectRequest,
     ProvisionSlotRequest,
     Request,
+    TrafficRequest,
     UpdateSocksAuthRequest,
     WorkerErrorResponse,
     WorkerResponse,
@@ -38,6 +39,10 @@ class WorkerDispatcher:
             return WorkerResponse(ok=True, data={"status": "ok"})
         if isinstance(request, InspectRequest):
             return WorkerResponse(ok=True, data={"slots": await self.manager.inspect()})
+        if isinstance(request, TrafficRequest):
+            from gate.telemetry import collect_counters
+
+            return WorkerResponse(ok=True, data=await collect_counters(self.manager))
         if isinstance(request, ProvisionSlotRequest):
             spec = await self.manager.provision(request)
             return WorkerResponse(
