@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$HostAlias = "HK-Aliyun",
+    [string]$HostAlias = "JP-AWS",
     [switch]$Bootstrap,
     [switch]$SkipTests
 )

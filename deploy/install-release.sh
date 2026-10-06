@@ -25,6 +25,7 @@ CURRENT=/opt/gate/current
 PREVIOUS=""
 ACTIVATED=0
 TARGET_CREATED=0
+BACKUP_ROOT=/var/backups/gate
 
 resolved_current="$(readlink -f "$CURRENT" 2>/dev/null || true)"
 case "$resolved_current" in
@@ -87,6 +88,21 @@ if [ -e "$TARGET" ]; then
     echo "Release directory already exists but is not the ready active release: $TARGET" >&2
     exit 2
 fi
+
+# Preserve the live control state before changing the active release. The
+# release directory provides code rollback; this snapshot covers configuration
+# and SQLite state without copying credentials into the release archive.
+install -d -o root -g root -m 0700 "$BACKUP_ROOT"
+backup_stamp="$(date +%Y%m%d-%H%M%S)"
+backup_path="$BACKUP_ROOT/gate-$RELEASE_ID-$backup_stamp"
+install -d -o root -g root -m 0700 "$backup_path"
+if [ -f /etc/gate/config.yaml ]; then
+    cp -a /etc/gate/config.yaml "$backup_path/config.yaml"
+fi
+if [ -f /var/lib/gate/gate.db ]; then
+    cp -a /var/lib/gate/gate.db "$backup_path/gate.db"
+fi
+chmod 0600 "$backup_path"/* 2>/dev/null || true
 install -d -o root -g root -m 0755 "$TARGET"
 TARGET_CREATED=1
 tar -xzf "$ARCHIVE" -C "$TARGET"

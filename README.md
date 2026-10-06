@@ -24,7 +24,7 @@ v0.1 MVP 已实现并部署到真实 VPS，已完成生产链路、断线阻断�
 - React/TypeScript WebUI，覆盖桌面与 360px 以上移动视口
 - systemd 加固、GitHub 预编译发布、VPS 一键安装和失败自动回滚
 
-- 部署目标：SSH 主机别名 `HK-Aliyun`
+- 部署目标：SSH 主机别名 `JP-AWS`
 - 开发环境：Windows
 - 生产环境：Debian 13，2 vCPU，约 4 GiB RAM
 - 默认访问方式：SSH 隧道，不公开暴露 WebUI 和 SOCKS 端口
