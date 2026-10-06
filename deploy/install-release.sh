@@ -48,7 +48,9 @@ rollback() {
     if [ "$ACTIVATED" -eq 1 ]; then
         if [ -n "$PREVIOUS" ] && [ -d "$PREVIOUS" ]; then
             switch_current "$PREVIOUS"
-            systemctl restart gate-worker.service gate-api.service >/dev/null 2>&1 || true
+            systemctl stop gate-api.service >/dev/null 2>&1 || true
+            systemctl restart gate-worker.service >/dev/null 2>&1 || true
+            systemctl start gate-api.service >/dev/null 2>&1 || true
         else
             active_target="$(readlink -f "$CURRENT" 2>/dev/null || true)"
             if [ "$active_target" = "$TARGET" ]; then
@@ -185,8 +187,11 @@ systemctl daemon-reload
 systemctl enable gate-firewall.service haproxy.service gate-worker.service gate-api.service
 systemctl restart gate-firewall.service
 systemctl reload-or-restart haproxy.service
+# Stop the scheduler before restarting its worker dependency. Otherwise the
+# old API process can treat the worker socket gap as real route failures.
+systemctl stop gate-api.service
 systemctl restart gate-worker.service
-systemctl restart gate-api.service
+systemctl start gate-api.service
 
 attempt=0
 until curl --fail --silent http://127.0.0.1:18080/api/v1/health/ready >/dev/null; do
