@@ -37,10 +37,10 @@ wire totals, tunnel IP bytes, proxy payload and HTTP body bytes must not be summ
 
 Idle disconnection remains opt-in and is not part of the default persistent service.
 
-Release validation (2026-10-07): `v0.1.12` is active on JP-AWS as
-`20261007-065711-a086cb1`; the installer created a rollback backup, all four Gate
+Release validation (2026-10-07): `v0.1.13` is active on JP-AWS as
+`20261007-071012-bf41a53`; the installer created a rollback backup, all four Gate
 services are active, health live/ready checks return `200`, and all 11 enabled
 authenticated SOCKS entrances returned the same IP recorded for their active exit.
-The deployment backup is `/var/backups/gate/gate-20261007-065711-a086cb1-20261006-225751/`.
+The deployment backup is `/var/backups/gate/gate-20261007-071012-bf41a53-20261006-231051/`.
 The 24-hour traffic comparison remains open until the passive sampler has a full
 post-change window.
