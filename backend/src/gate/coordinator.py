@@ -25,6 +25,14 @@ class SwitchBusyError(SwitchError):
     code = "SWITCH_BUSY"
 
 
+class DuplicateExitError(SwitchError):
+    code = "DUPLICATE_EXIT"
+
+
+class CandidateExcludedError(SwitchError):
+    code = "CANDIDATE_EXCLUDED"
+
+
 class WorkerGateway(Protocol):
     async def request(self, request: Request) -> dict[str, object]: ...
 
@@ -84,6 +92,7 @@ class SwitchCoordinator:
         self._group_locks: dict[str, asyncio.Lock] = {}
         self._cleanup_tasks: set[asyncio.Task[None]] = set()
         self.noise_guard: Callable[[str, str], Awaitable[None]] | None = None
+        self.failure_guard: Callable[[Exception], Awaitable[Exception]] | None = None
 
     def set_socks_auth(self, auth: SocksAuthConfig) -> None:
         self._socks_auth = auth
@@ -191,26 +200,20 @@ class SwitchCoordinator:
                     )
                     continue
                 except Exception as exc:
-                    await self.haproxy.disable(record.region_id, record.slot)
-                    with suppress(GateError):
-                        await self.worker.request(
-                            DestroySlotRequest(
-                                action="destroy_slot",
-                                region_id=record.region_id,
-                                slot=cast(Literal["a", "b"], record.slot),
-                            )
-                        )
-                    await self.database.mark_slot_empty(record.region_id, record.slot)
                     error_code = (
                         exc.code if isinstance(exc, GateError) else "RECONCILE_PROBE_FAILED"
                     )
                     await self.database.add_event(
-                        code="RECONCILE_REJECTED_ACTIVE_SLOT",
-                        level="error",
-                        message=f"{region.name} 的活动隧道未通过启动校验, 已停止使用",
+                        code="RECONCILE_ACTIVE_SLOT_UNCONFIRMED",
+                        level="warning",
+                        message=f"{region.name} 启动时出口证据不足, 保留隧道并交给连续健康检查复核",
                         region_id=record.region_id,
                         node_id=record.node_id,
-                        details={"slot": record.slot, "error_code": error_code},
+                        details={
+                            "slot": record.slot,
+                            "error_code": error_code,
+                            "error_type": type(exc).__name__,
+                        },
                     )
                     continue
                 conflict = await self.database.get_active_conflict(
@@ -246,6 +249,18 @@ class SwitchCoordinator:
                     },
                 )
             else:
+                if record.state == "active":
+                    await self.database.add_event(
+                        code="RECONCILE_ACTIVE_TUNNEL_PENDING",
+                        level="warning",
+                        message=(
+                            f"入口 {record.region_id} 的活动隧道启动检查未通过, "
+                            "保留记录等待健康复核"
+                        ),
+                        region_id=record.region_id,
+                        node_id=record.node_id,
+                    )
+                    continue
                 if record.state != "empty" or actual_exists.get(key, False):
                     await self._destroy_slot(record.region_id, slot)
                 else:
@@ -358,6 +373,7 @@ class SwitchCoordinator:
                 1080,
                 expected_countries=set(region.countries),
             )
+            await self.database.history.verify_profile(node_id, probe.egress_ip)
             if self.noise_guard is not None:
                 await self.noise_guard(region_id, target_slot)
             conflict = await self.database.get_active_conflict(
@@ -366,7 +382,9 @@ class SwitchCoordinator:
                 egress_ip=probe.egress_ip,
             )
             if conflict is not None:
-                raise SwitchError(f"出口 {probe.egress_ip} 已被同地区入口 {conflict.name} 使用")
+                raise DuplicateExitError(
+                    f"出口 {probe.egress_ip} 已被同地区入口 {conflict.name} 使用"
+                )
             await self.database.set_slot_egress_ip(region_id, target_slot, probe.egress_ip)
             await self.database.record_probe(
                 region_id=region_id,
@@ -400,15 +418,34 @@ class SwitchCoordinator:
                 latency_ms=probe.latency_ms,
             )
         except Exception as exc:
+            if self.failure_guard is not None:
+                exc = await self.failure_guard(exc)
             error_code = exc.code if isinstance(exc, GateError) else "UNEXPECTED_PROBE_ERROR"
             await self.database.record_probe(
                 region_id=region_id,
                 node_id=node_id,
                 probe_type="candidate",
-                result="failed",
+                result=(
+                    "failed"
+                    if error_code
+                    in {
+                        "PROBE_FAILED",
+                        "TUNNEL_CONNECT_FAILED",
+                        "REGION_MISMATCH",
+                    }
+                    else "unknown"
+                ),
                 error_code=error_code,
                 started_at=started_at,
             )
+            if error_code in {
+                "PROBE_FAILED",
+                "TUNNEL_CONNECT_FAILED",
+                "REGION_MISMATCH",
+            }:
+                await self.database.history.fail(
+                    node_id, f"candidate-probe:{region_id}:{node_id}:{started_at.timestamp()}"
+                )
             await self.database.add_event(
                 code="CANDIDATE_PROBE_FAILED",
                 level="warning",
@@ -417,7 +454,7 @@ class SwitchCoordinator:
                 node_id=node_id,
                 details={"slot": target_slot, "error_code": error_code},
             )
-            raise
+            raise exc
         finally:
             with suppress(GateError):
                 await self.worker.request(
@@ -443,12 +480,13 @@ class SwitchCoordinator:
         region, node = await self._load(region_id, node_id)
         conflict = await self.database.get_active_conflict(region_id, node_id=node_id)
         if conflict is not None:
-            raise SwitchError(f"节点已被同地区入口 {conflict.name} 使用")
+            raise CandidateExcludedError(f"节点已被同地区入口 {conflict.name} 使用")
         profile = self.discovery.profiles.get(node.fingerprint)
         if profile is None:
             raise SwitchError("candidate profile is not cached; refresh discovery and retry")
         active = await self.database.get_active_slot(region_id)
         previous_status = RegionStatus(region.status)
+        started_at = utc_now()
         target_slot = self._target_slot(active)
         target_enabled = False
         committed = False
@@ -479,6 +517,7 @@ class SwitchCoordinator:
                 1080,
                 expected_countries=set(region.countries),
             )
+            await self.database.history.verify_profile(node_id, direct_probe.egress_ip)
             if self.noise_guard is not None:
                 await report(0.55, "正在观察候选隧道的持续广播开销")
                 await self.noise_guard(region_id, target_slot)
@@ -490,7 +529,7 @@ class SwitchCoordinator:
                 egress_ip=direct_probe.egress_ip,
             )
             if conflict is not None:
-                raise SwitchError(
+                raise DuplicateExitError(
                     f"出口 {direct_probe.egress_ip} 已被同地区入口 {conflict.name} 使用"
                 )
 
@@ -506,6 +545,17 @@ class SwitchCoordinator:
             )
             if stable_probe.egress_ip != direct_probe.egress_ip:
                 raise SwitchError("stable SOCKS port reached a different exit than the candidate")
+
+            await self.database.record_probe(
+                region_id=region_id,
+                node_id=node_id,
+                probe_type="candidate",
+                result="succeeded",
+                egress_ip=stable_probe.egress_ip,
+                country_code=stable_probe.country_code,
+                latency_ms=stable_probe.latency_ms,
+                started_at=started_at,
+            )
 
             commit = asyncio.create_task(
                 self.database.complete_switch(
@@ -554,13 +604,41 @@ class SwitchCoordinator:
         except (Exception, asyncio.CancelledError) as exc:
             if committed:
                 raise  # The verified new route is already the committed DB state.
+            if isinstance(exc, Exception) and self.failure_guard is not None:
+                exc = await self.failure_guard(exc)
+            error_code = exc.code if isinstance(exc, GateError) else "UNEXPECTED_SWITCH_ERROR"
+            if isinstance(exc, GateError) and error_code in {
+                "PROBE_FAILED",
+                "TUNNEL_CONNECT_FAILED",
+                "REGION_MISMATCH",
+            }:
+                incident = f"switch:{region_id}:{node_id}:{started_at.timestamp()}"
+                await self.database.history.fail(node_id, incident)
+                exc.selection_incident = incident
+            await self.database.record_probe(
+                region_id=region_id,
+                node_id=node_id,
+                probe_type="candidate",
+                result=(
+                    "failed"
+                    if error_code
+                    in {
+                        "PROBE_FAILED",
+                        "TUNNEL_CONNECT_FAILED",
+                        "REGION_MISMATCH",
+                    }
+                    else "unknown"
+                ),
+                error_code=error_code,
+                started_at=started_at,
+            )
             if target_enabled:
                 await self.haproxy.disable(region_id, target_slot)
-            if active is not None:
-                # A failed candidate must never remove the last configured
-                # route. HAProxy health checks will still take a genuinely
-                # broken tunnel out of rotation after it is restored.
+            restored = active is not None and previous_status != RegionStatus.UNAVAILABLE
+            if restored and active is not None:
                 await self.haproxy.ready(region_id, active.slot)
+            elif active is not None:
+                await self.haproxy.disable(region_id, active.slot)
             with suppress(GateError):
                 await self.worker.request(
                     DestroySlotRequest(
@@ -571,13 +649,21 @@ class SwitchCoordinator:
                 )
             await self.database.mark_slot_empty(region_id, target_slot)
             await self.database.set_region_status(region_id, previous_status)
-            error_code = exc.code if isinstance(exc, GateError) else "UNEXPECTED_SWITCH_ERROR"
             await self.database.add_event(
                 code="SWITCH_ROLLED_BACK",
                 level="error",
-                message=f"{region.name} 切换失败, 已恢复原线路",
+                message=(
+                    f"{region.name} 切换失败, 已恢复原线路"
+                    if restored
+                    else f"{region.name} 切换失败, 没有可恢复线路, 入口保持不可用"
+                ),
                 region_id=region_id,
                 node_id=node_id,
-                details={"slot": target_slot, "node_id": node_id, "error_code": error_code},
+                details={
+                    "slot": target_slot,
+                    "node_id": node_id,
+                    "error_code": error_code,
+                    "restored": restored,
+                },
             )
-            raise
+            raise exc

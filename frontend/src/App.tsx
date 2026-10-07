@@ -56,6 +56,7 @@ import type {
   SocksAuthState,
   TelegramSettings,
   MonitoringPolicy,
+  SelectionPolicy,
   TrafficSummary,
 } from "./types";
 
@@ -69,6 +70,20 @@ const REGION_LABELS: Record<string, string> = {
 
 function groupLabel(region: Region): string {
   return REGION_LABELS[region.group_id] ?? countryNameZh(region.countries[0] ?? "", region.name);
+}
+
+function stabilityLabel(value: string | null | undefined): string {
+  if (value === "stable") return "稳定";
+  if (value === "verified") return "已验证";
+  if (value === "unverified") return "未验证";
+  return "证据积累中";
+}
+
+function switchReasonLabel(value: string | null | undefined): string {
+  if (value === "confirmed_failure_recovery") return "故障恢复";
+  if (value === "sustained_noise_reduction") return "噪声优化";
+  if (value === "manual") return "手动切换";
+  return "当前线路保持";
 }
 
 function entryLabel(region: Region): string {
@@ -691,6 +706,9 @@ function RegionInspector({
         <div><dt>实际出口 IP</dt><dd>{region.active_egress_ip ?? "--"}</dd></div>
         <div><dt>出口地区</dt><dd>{region.active_egress_ip ? groupLabel(region) : "--"}</dd></div>
         <div><dt>出口来源</dt><dd>VPN 隧道</dd></div>
+        <div><dt>稳定等级 / 观察时长</dt><dd>{`${stabilityLabel(region.active_stability)} · ${(region.observed_hours ?? 0).toFixed(1)} 小时`}</dd></div>
+        <div><dt>切换原因</dt><dd>{switchReasonLabel(region.last_switch_reason)}</dd></div>
+        {region.next_retry_at ? <div><dt>下次恢复尝试</dt><dd>{formatTime(region.next_retry_at)}</dd></div> : null}
       </dl>
       <SlotPair slots={slots} standbyState={region.standby_state} unavailable={runtimeUnavailable} />
       {activeJob ? (
@@ -1241,33 +1259,58 @@ function TrafficView({
   );
 }
 
-function MonitoringSettingsView({
+export function MonitoringSettingsView({
   policy,
+  selectionPolicy,
   loading,
+  selectionLoading,
+  selectionError,
   saving,
   onSave,
+  onSaveSelection,
+  onRetrySelection,
 }: {
   policy: MonitoringPolicy | undefined;
+  selectionPolicy: SelectionPolicy | undefined;
   loading: boolean;
+  selectionLoading: boolean;
+  selectionError: boolean;
   saving: boolean;
   onSave: (policy: MonitoringPolicy) => void;
+  onSaveSelection: (policy: SelectionPolicy) => void;
+  onRetrySelection: () => void;
 }) {
   const [draft, setDraft] = useState<MonitoringPolicy | null>(policy ?? null);
+  const [selectionDraft, setSelectionDraft] = useState<SelectionPolicy | null>(selectionPolicy ?? null);
   useEffect(() => { if (policy) setDraft(policy); }, [policy]);
+  useEffect(() => { if (selectionPolicy) setSelectionDraft(selectionPolicy); }, [selectionPolicy]);
   if (loading || !draft) return <main className="data-page"><SkeletonRows count={5} /></main>;
   const update = <K extends keyof MonitoringPolicy>(key: K, value: MonitoringPolicy[K]) => setDraft({ ...draft, [key]: value });
+  const updateSelection = <K extends keyof SelectionPolicy>(key: K, value: SelectionPolicy[K]) => selectionDraft && setSelectionDraft({ ...selectionDraft, [key]: value });
   return <main className="data-page settings-page" aria-labelledby="settings-title">
     <div className="page-intro"><div><span className="eyebrow">CONTROL PLANE</span><h1 id="settings-title">检测与控制</h1><p>调整周期、预算和噪声防护。保存后会持久化到服务端。</p></div><button className="button button--primary" disabled={saving} onClick={() => onSave(draft)} type="button">{saving ? <LoaderCircle className="spin" size={16} /> : <Settings2 size={16} />}{saving ? "保存中" : "保存策略"}</button></div>
     <section className="settings-grid">
-      <article className="data-panel settings-panel"><div className="panel-heading"><div><h2>健康检查</h2><p>轻量检查保持在较低频率，完整验证按需执行。</p></div><ShieldCheck size={20} /></div><label className="setting-field"><span>轻量检查间隔（秒）</span><input min="60" max="3600" type="number" value={draft.health_interval_seconds} onChange={(event) => update("health_interval_seconds", Number(event.target.value))} /></label><label className="setting-field"><span>完整验证间隔（小时）</span><input min="1" max="48" type="number" value={draft.full_verification_hours} onChange={(event) => update("full_verification_hours", Number(event.target.value))} /></label><label className="setting-field"><span>检测超时（秒）</span><input min="3" max="60" type="number" value={draft.probe_timeout_seconds} onChange={(event) => update("probe_timeout_seconds", Number(event.target.value))} /></label><label className="setting-field"><span>并发检测数</span><input min="1" max="8" type="number" value={draft.max_concurrent_probes} onChange={(event) => update("max_concurrent_probes", Number(event.target.value))} /></label></article>
-      <article className="data-panel settings-panel"><div className="panel-heading"><div><h2>流量与噪声</h2><p>识别持续 DHCP/广播开销，保护正常线路。</p></div><Activity size={20} /></div><label className="setting-field"><span>每日软预算（MiB）</span><input min="10" max="2048" type="number" value={draft.daily_budget_mib} onChange={(event) => update("daily_budget_mib", Number(event.target.value))} /></label><label className="setting-field setting-toggle"><span>启用噪声防护</span><input checked={draft.noise_guard_enabled} type="checkbox" onChange={(event) => update("noise_guard_enabled", event.target.checked)} /></label><label className="setting-field"><span>噪声阈值（bytes/s）</span><input min="256" max="1048576" type="number" value={draft.noise_bytes_per_second} onChange={(event) => update("noise_bytes_per_second", Number(event.target.value))} /></label><label className="setting-field"><span>确认窗口数</span><input min="2" max="8" type="number" value={draft.noise_confirmation_windows} onChange={(event) => update("noise_confirmation_windows", Number(event.target.value))} /></label></article>
+      <article className="data-panel settings-panel"><div className="panel-heading"><div><h2>健康检查</h2><p>轻量检查保持在较低频率，完整验证按需执行。</p></div><ShieldCheck size={20} /></div><label className="setting-field"><span>轻量检查间隔（秒）</span><input min="60" max="3600" type="number" value={draft.health_interval_seconds} onChange={(event) => update("health_interval_seconds", Number(event.target.value))} /></label><label className="setting-field"><span>完整验证间隔（小时）</span><input min="1" max="24" type="number" value={draft.full_verification_hours} onChange={(event) => update("full_verification_hours", Number(event.target.value))} /></label><label className="setting-field"><span>检测超时（秒）</span><input min="3" max="30" type="number" value={draft.probe_timeout_seconds} onChange={(event) => update("probe_timeout_seconds", Number(event.target.value))} /></label><label className="setting-field"><span>并发检测数</span><input min="1" max="4" type="number" value={draft.max_concurrent_probes} onChange={(event) => update("max_concurrent_probes", Number(event.target.value))} /></label></article>
+      <article className="data-panel settings-panel"><div className="panel-heading"><div><h2>流量与噪声</h2><p>识别持续 DHCP/广播开销，保护正常线路。</p></div><Activity size={20} /></div><label className="setting-field"><span>每日软预算（MiB）</span><input min="10" max="4096" type="number" value={draft.daily_budget_mib} onChange={(event) => update("daily_budget_mib", Number(event.target.value))} /></label><label className="setting-field setting-toggle"><span>启用噪声防护</span><input checked={draft.noise_guard_enabled} type="checkbox" onChange={(event) => update("noise_guard_enabled", event.target.checked)} /></label><label className="setting-field"><span>噪声阈值（bytes/s）</span><input min="256" max="1048576" type="number" value={draft.noise_bytes_per_second} onChange={(event) => update("noise_bytes_per_second", Number(event.target.value))} /></label><label className="setting-field"><span>确认窗口数</span><input min="2" max="10" type="number" value={draft.noise_confirmation_windows} onChange={(event) => update("noise_confirmation_windows", Number(event.target.value))} /></label></article>
+      <article className="data-panel settings-panel settings-panel--wide">
+        <div className="panel-heading"><div><h2>稳定优先切换</h2><p>稳定线路持续使用，故障恢复最多按顺序尝试 5 个候选。</p></div><ShieldCheck size={20} /></div>
+        {selectionError ? <div role="alert"><p>稳定策略加载失败，请重新读取后再修改。</p><button className="button button--secondary" type="button" onClick={onRetrySelection}><RefreshCw size={16} />重新读取策略</button></div> : selectionLoading || !selectionDraft ? <SkeletonRows count={3} /> : (
+          <form aria-label="稳定优先切换策略" onSubmit={(event) => { event.preventDefault(); onSaveSelection(selectionDraft); }}>
+            <label className="setting-field"><span>稳定资格观察时长（小时）</span><input required min="24" max="168" type="number" value={selectionDraft.stable_observation_hours} onChange={(event) => updateSelection("stable_observation_hours", Number(event.target.value))} /></label>
+            <label className="setting-field"><span>稳定资格最低成功率（%）</span><input required min="99" max="100" step="0.1" type="number" value={selectionDraft.stable_success_rate * 100} onChange={(event) => updateSelection("stable_success_rate", Number(event.target.value) / 100)} /></label>
+            <label className="setting-field"><span>每轮候选上限</span><input required min="1" max="5" type="number" value={selectionDraft.max_candidates_per_batch} onChange={(event) => updateSelection("max_candidates_per_batch", Number(event.target.value))} /></label>
+            <label className="setting-field setting-toggle"><span>维护地区共享备用记录</span><input checked={selectionDraft.standby_enabled} type="checkbox" onChange={(event) => updateSelection("standby_enabled", event.target.checked)} /></label>
+            <button className="button button--secondary" disabled={saving} type="submit">{saving ? <LoaderCircle className="spin" size={16} /> : <Settings2 size={16} />}保存稳定策略</button>
+          </form>
+        )}
+      </article>
       <article className="data-panel settings-panel settings-panel--wide"><div className="panel-heading"><div><h2>凭据与通知</h2><p>这些入口继续使用原有安全对话框。</p></div><BellRing size={20} /></div><div className="settings-actions"><button className="button button--secondary" type="button" onClick={() => window.dispatchEvent(new CustomEvent("gate:open-socks"))}><ShieldUser size={16} />SOCKS 接入</button><button className="button button--secondary" type="button" onClick={() => window.dispatchEvent(new CustomEvent("gate:open-telegram"))}><BellRing size={16} />Telegram 通知</button><button className="button button--secondary" type="button" onClick={() => window.dispatchEvent(new CustomEvent("gate:backup"))}><Download size={16} />导出备份</button></div></article>
     </section>
   </main>;
 }
 
 function ConfirmSwitchDialog({ region, busy, onCancel, onConfirm }: { region: Region | null; busy: boolean; onCancel: () => void; onConfirm: () => void }) {
-  return <dialog className="confirm-dialog" open={Boolean(region)} aria-labelledby="confirm-switch-title"><div className="confirm-dialog__icon"><ArrowLeftRight size={20} /></div><h2 id="confirm-switch-title">确认切换出口？</h2><p>{region ? `${entryLabel(region)} 当前出口为 ${region.active_egress_ip ?? "未分配"}。系统将随机抽取最多 5 个未失败候选，并在验证失败时回滚。` : ""}</p><div className="dialog-actions"><button className="button button--secondary" disabled={busy} onClick={onCancel} type="button">取消</button><button className="button button--primary" disabled={busy} onClick={onConfirm} type="button">{busy ? <LoaderCircle className="spin" size={16} /> : <ArrowLeftRight size={16} />}{busy ? "提交中" : "确认切换"}</button></div></dialog>;
+  return <dialog className="confirm-dialog" open={Boolean(region)} aria-labelledby="confirm-switch-title"><div className="confirm-dialog__icon"><ArrowLeftRight size={20} /></div><h2 id="confirm-switch-title">确认切换出口？</h2><p>{region ? `${entryLabel(region)} 当前出口为 ${region.active_egress_ip ?? "未分配"}。系统将按稳定等级依次尝试最多 5 个未失败候选；失败节点遵守冷却，验证通过后才启用。` : ""}</p><div className="dialog-actions"><button className="button button--secondary" disabled={busy} onClick={onCancel} type="button">取消</button><button className="button button--primary" disabled={busy} onClick={onConfirm} type="button">{busy ? <LoaderCircle className="spin" size={16} /> : <ArrowLeftRight size={16} />}{busy ? "提交中" : "确认切换"}</button></div></dialog>;
 }
 
 function ConsoleView({
@@ -1303,6 +1346,7 @@ function ConsoleView({
   const eventsQuery = useQuery({ queryKey: ["events"], queryFn: gateApi.events, refetchInterval: 30_000 });
   const trafficQuery = useQuery({ queryKey: ["traffic", trafficWindow], queryFn: () => gateApi.traffic(trafficWindow), refetchInterval: 60_000, enabled: params.get("view") === "traffic" });
   const monitoringQuery = useQuery({ queryKey: ["monitoring"], queryFn: gateApi.monitoring, refetchInterval: false, enabled: params.get("view") === "settings" });
+  const selectionPolicyQuery = useQuery({ queryKey: ["selection-policy"], queryFn: gateApi.selectionPolicy, refetchInterval: false, enabled: params.get("view") === "settings" });
   const regions = regionsQuery.data ?? [];
   const jobs = jobsQuery.data ?? [];
   const slots = slotsQuery.data ?? [];
@@ -1356,7 +1400,7 @@ function ConsoleView({
     mutationFn: gateApi.switchRegion,
     onSuccess: () => {
       setSwitchTarget(null);
-      setNotice("出口切换任务已提交；系统将按排除记录随机尝试候选线路");
+      setNotice("出口切换任务已提交；系统将按节点稳定履历依次尝试候选线路");
       void queryClient.invalidateQueries({ queryKey: ["jobs"] });
       void queryClient.invalidateQueries({ queryKey: ["regions"] });
     },
@@ -1366,6 +1410,13 @@ function ConsoleView({
     onSuccess: (policy) => {
       queryClient.setQueryData(["monitoring"], policy);
       setNotice("检测策略已保存");
+    },
+  });
+  const selectionPolicyMutation = useMutation({
+    mutationFn: gateApi.updateSelectionPolicy,
+    onSuccess: (policy) => {
+      queryClient.setQueryData(["selection-policy"], policy);
+      setNotice("稳定优先策略已保存");
     },
   });
   const cancelMutation = useMutation({
@@ -1418,7 +1469,7 @@ function ConsoleView({
     };
   }, [backupMutation]);
 
-  const mutationError = refreshMutation.error ?? probeMutation.error ?? modeMutation.error ?? reconnectMutation.error ?? switchMutation.error ?? cancelMutation.error ?? automationMutation.error ?? backupMutation.error ?? monitoringMutation.error;
+  const mutationError = refreshMutation.error ?? probeMutation.error ?? modeMutation.error ?? reconnectMutation.error ?? switchMutation.error ?? cancelMutation.error ?? automationMutation.error ?? backupMutation.error ?? monitoringMutation.error ?? selectionPolicyMutation.error;
   const enabledRegions = useMemo(() => regions.filter((region) => region.mode !== "disabled"), [regions]);
   const liveRegions = useMemo(() => enabledRegions.filter((region) => region.status === "healthy").length, [enabledRegions]);
   const runningJobs = useMemo(() => jobs.filter((job) => ["queued", "running"].includes(job.status)).length, [jobs]);
@@ -1485,7 +1536,7 @@ function ConsoleView({
           ) : view === "traffic" ? (
             <TrafficView error={trafficQuery.isError} loading={trafficQuery.isLoading} onRange={setTrafficWindow} onRetry={() => void trafficQuery.refetch()} traffic={trafficQuery.data} />
           ) : view === "settings" ? (
-            <MonitoringSettingsView loading={monitoringQuery.isLoading} onSave={(policy) => monitoringMutation.mutate(policy)} policy={monitoringQuery.data} saving={monitoringMutation.isPending} />
+            <MonitoringSettingsView loading={monitoringQuery.isLoading} onSave={(policy) => monitoringMutation.mutate(policy)} policy={monitoringQuery.data} selectionLoading={selectionPolicyQuery.isLoading} selectionError={selectionPolicyQuery.isError} onRetrySelection={() => void selectionPolicyQuery.refetch()} selectionPolicy={selectionPolicyQuery.data} onSaveSelection={(policy) => selectionPolicyMutation.mutate(policy)} saving={monitoringMutation.isPending || selectionPolicyMutation.isPending} />
           ) : view === "jobs" ? (
             <main className="activity-page" aria-labelledby="jobs-title">
               <div className="section-heading"><div><h1 id="jobs-title">控制任务</h1><p>查看测试、切换和自动维护的执行结果。</p></div><span className="record-count">{jobs.length} 条记录</span></div>

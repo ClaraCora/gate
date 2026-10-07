@@ -228,7 +228,8 @@ class TelegramBot:
             )
             return
         await self.notifier.send(
-            f"确认切换到「{region_name}」?\n\n系统将按排除机制随机尝试最多 5 个候选出口。",
+            f"确认切换「{region_name}」的出口?\n\n"
+            "系统将按节点历史表现排序, 排除不可用线路后最多尝试 5 个候选。",
             reply_markup={
                 "inline_keyboard": [
                     [

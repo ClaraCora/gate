@@ -24,6 +24,10 @@ class NetworkOperationError(GateError):
     code = "NETWORK_OPERATION_FAILED"
 
 
+class TunnelConnectError(NetworkOperationError):
+    code = "TUNNEL_CONNECT_FAILED"
+
+
 @dataclass(frozen=True, slots=True)
 class ExecutablePaths:
     ip: str
@@ -397,9 +401,9 @@ class LinuxNetworkManager:
                 check=False,
             )
             if unit_state.stdout.strip() in {"failed", "inactive"}:
-                raise NetworkOperationError(f"OpenVPN exited before tunnel setup: {spec.namespace}")
+                raise TunnelConnectError(f"OpenVPN exited before tunnel setup: {spec.namespace}")
             await asyncio.sleep(0.25)
-        raise NetworkOperationError(f"OpenVPN tunnel did not become ready: {spec.namespace}")
+        raise TunnelConnectError(f"OpenVPN tunnel did not become ready: {spec.namespace}")
 
     def _slot_directory(self, spec: SlotSpec) -> Path:
         return self.state_root / spec.namespace

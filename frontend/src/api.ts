@@ -15,6 +15,7 @@ import type {
   TelegramSettings,
   TelegramSettingsUpdate,
   MonitoringPolicy,
+  SelectionPolicy,
   TrafficSummary,
 } from "./types";
 
@@ -108,6 +109,9 @@ export const gateApi = {
   monitoring: () => request<MonitoringPolicy>("/api/v1/monitoring"),
   updateMonitoring: (policy: MonitoringPolicy) =>
     request<MonitoringPolicy>("/api/v1/monitoring", { method: "PUT", body: JSON.stringify(policy) }),
+  selectionPolicy: () => request<SelectionPolicy>("/api/v1/selection-policy"),
+  updateSelectionPolicy: (policy: SelectionPolicy) =>
+    request<SelectionPolicy>("/api/v1/selection-policy", { method: "PUT", body: JSON.stringify(policy) }),
   traffic: (window: "today" | "24h" | "7d" = "24h") =>
     request<TrafficSummary>(`/api/v1/traffic?window=${window}&tz_offset_minutes=${-new Date().getTimezoneOffset()}`),
   updateTelegram: (update: TelegramSettingsUpdate) =>

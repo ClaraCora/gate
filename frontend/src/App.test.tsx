@@ -3,8 +3,8 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { PropsWithChildren } from "react";
 
 import { gateApi } from "./api";
-import { AutomationControl, HealthGrains, RegionTable, SocksAuthDialog, TelegramSettingsDialog, useGateStream } from "./App";
-import type { HealthCheck, Region } from "./types";
+import { AutomationControl, HealthGrains, MonitoringSettingsView, RegionTable, SocksAuthDialog, TelegramSettingsDialog, useGateStream } from "./App";
+import type { HealthCheck, MonitoringPolicy, Region, SelectionPolicy } from "./types";
 
 function wrapper({ children }: PropsWithChildren) {
   const client = new QueryClient({
@@ -339,5 +339,47 @@ describe("TelegramSettingsDialog", () => {
       chat_id: "-100123",
       api_base_url: "https://api.telegram.org",
     }));
+  });
+});
+
+describe("stable selection settings", () => {
+  const monitoring: MonitoringPolicy = {
+    health_interval_seconds: 300, full_verification_hours: 6, discovery_interval_minutes: 60,
+    optimization_enabled: false, failure_confirm_seconds: 10, probe_timeout_seconds: 12,
+    max_concurrent_probes: 2, daily_budget_mib: 100, noise_guard_enabled: true,
+    noise_bytes_per_second: 2048, noise_observation_seconds: 20, noise_confirmation_windows: 3,
+    noise_switch_cooldown_minutes: 60,
+  };
+  const selection: SelectionPolicy = {
+    stable_observation_hours: 24, stable_success_rate: 0.99, max_candidates_per_batch: 5,
+    standby_enabled: true, standby_pool_size: 3, standby_interval_hours: 6,
+    standby_timeout_seconds: 180, noise_sustained_minutes: 15, noise_replacement_hours: 6,
+  };
+
+  it("validates the five-candidate limit and saves the edited policy", () => {
+    const save = vi.fn();
+    render(<MonitoringSettingsView policy={monitoring} selectionPolicy={selection}
+      loading={false} selectionLoading={false} selectionError={false} saving={false}
+      onSave={vi.fn()} onSaveSelection={save} onRetrySelection={vi.fn()} />);
+    const limit = screen.getByLabelText("每轮候选上限");
+    fireEvent.change(limit, { target: { value: "6" } });
+    expect((limit as HTMLInputElement).checkValidity()).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "保存稳定策略" }));
+    expect(save).not.toHaveBeenCalled();
+    fireEvent.change(limit, { target: { value: "3" } });
+    fireEvent.change(screen.getByLabelText("稳定资格最低成功率（%）"), { target: { value: "99.5" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存稳定策略" }));
+    expect(save).toHaveBeenCalledWith({ ...selection, max_candidates_per_batch: 3, stable_success_rate: 0.995 });
+  });
+
+  it("keeps failed policy reads recoverable without offering a default save", () => {
+    const retry = vi.fn();
+    render(<MonitoringSettingsView policy={monitoring} selectionPolicy={undefined}
+      loading={false} selectionLoading={false} selectionError saving={false}
+      onSave={vi.fn()} onSaveSelection={vi.fn()} onRetrySelection={retry} />);
+    expect(screen.getByRole("alert")).toHaveTextContent("稳定策略加载失败");
+    expect(screen.queryByRole("button", { name: "保存稳定策略" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "重新读取策略" }));
+    expect(retry).toHaveBeenCalledOnce();
   });
 });

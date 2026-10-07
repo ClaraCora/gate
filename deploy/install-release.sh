@@ -101,8 +101,20 @@ install -d -o root -g root -m 0700 "$backup_path"
 if [ -f /etc/gate/config.yaml ]; then
     cp -a /etc/gate/config.yaml "$backup_path/config.yaml"
 fi
+for credential_file in secrets.env socks-auth.json; do
+    if [ -f "/etc/gate/$credential_file" ]; then
+        cp -a "/etc/gate/$credential_file" "$backup_path/$credential_file"
+    fi
+done
 if [ -f /var/lib/gate/gate.db ]; then
-    cp -a /var/lib/gate/gate.db "$backup_path/gate.db"
+    python3 - /var/lib/gate/gate.db "$backup_path/gate.db" <<'PY'
+import sqlite3
+import sys
+
+with sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True) as source:
+    with sqlite3.connect(sys.argv[2]) as target:
+        source.backup(target)
+PY
 fi
 chmod 0600 "$backup_path"/* 2>/dev/null || true
 install -d -o root -g root -m 0755 "$TARGET"

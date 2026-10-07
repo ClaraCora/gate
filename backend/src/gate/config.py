@@ -41,6 +41,20 @@ class AutomationConfig(BaseModel):
     max_candidates_per_cycle: int = Field(default=5, ge=1, le=5)
 
 
+class SelectionPolicy(BaseModel):
+    """Stable selection; legacy quality optimization settings remain readable only."""
+
+    stable_observation_hours: int = Field(default=24, ge=24, le=168)
+    stable_success_rate: float = Field(default=0.99, ge=0.99, le=1)
+    max_candidates_per_batch: int = Field(default=5, ge=1, le=5)
+    standby_enabled: bool = True
+    standby_pool_size: int = Field(default=3, ge=1, le=3)
+    standby_interval_hours: int = Field(default=6, ge=6, le=24)
+    standby_timeout_seconds: int = Field(default=180, ge=60, le=180)
+    noise_sustained_minutes: int = Field(default=15, ge=15, le=120)
+    noise_replacement_hours: int = Field(default=6, ge=6, le=48)
+
+
 class MonitoringPolicy(BaseModel):
     health_interval_seconds: int = Field(default=300, ge=60, le=3600)
     full_verification_hours: int = Field(default=6, ge=1, le=24)
@@ -166,6 +180,7 @@ class GateSettings(BaseModel):
     database: DatabaseConfig = DatabaseConfig()
     discovery: DiscoveryConfig = DiscoveryConfig()
     selection: SelectionConfig = SelectionConfig()
+    selection_policy: SelectionPolicy = SelectionPolicy()
     automation: AutomationConfig = AutomationConfig()
     monitoring: MonitoringPolicy = MonitoringPolicy()
     telegram: TelegramConfig = TelegramConfig()

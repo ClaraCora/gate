@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 from gate.config import SocksAuthConfig, load_settings
-from gate.coordinator import SwitchCoordinator, SwitchError
+from gate.coordinator import SwitchBusyError, SwitchCoordinator, SwitchError
 from gate.database import Database
 from gate.discovery import DiscoveryService
 from gate.domain import RegionMode, RegionStatus, VpnGateNode
@@ -70,6 +70,11 @@ async def test_cancel_during_candidate_observation_preserves_active_route_and_cl
     tmp_path: Path, encoded_profile: str
 ) -> None:
     database, discovery, node_id = await _seed(tmp_path, encoded_profile)
+    settings = load_settings()
+    sibling = settings.regions[0].model_copy(
+        update={"id": "jp-02", "socks_port": 11101, "network_index": 6}
+    )
+    await database.initialize((*settings.regions, sibling))
     await database.complete_switch("jp", "a", node_id, "8.8.8.8")
     worker, haproxy = FakeWorker(), FakeHaProxy()
     coordinator = SwitchCoordinator(
@@ -88,6 +93,8 @@ async def test_cancel_during_candidate_observation_preserves_active_route_and_cl
     coordinator.noise_guard = wait_for_noise
     task = asyncio.create_task(coordinator.switch("jp", node_id))
     await asyncio.wait_for(observing.wait(), timeout=2)
+    with pytest.raises(SwitchBusyError):
+        await coordinator.probe_candidate("jp-02", node_id)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -254,7 +261,7 @@ async def test_failed_failover_restores_unavailable_old_route(
 
     region = await database.get_region("jp")
     assert region is not None and region.status == RegionStatus.UNAVAILABLE
-    assert haproxy.commands[-2:] == [("disable", "jp", "b"), ("ready", "jp", "a")]
+    assert haproxy.commands[-2:] == [("disable", "jp", "b"), ("disable", "jp", "a")]
     await database.close()
 
 

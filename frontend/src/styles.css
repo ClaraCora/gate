@@ -2837,5 +2837,6 @@ body, html { background: #f2f0e8; }
   .data-panel { padding: 16px; }
   .disclaimer { align-items: flex-start; }
   .settings-actions .button { flex: 1 1 100%; justify-content: flex-start; }
+  .setting-field input[type="number"] { flex-shrink: 0; font-size: 16px; }
   .confirm-dialog { padding: 20px; }
 }

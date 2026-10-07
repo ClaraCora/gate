@@ -1,8 +1,10 @@
 # Traffic reduction and console redesign — implementation contract
 
 Approved 2026-10-07 (Asia/Shanghai). Preserve 11 enabled persistent exits, fail-closed
-networking, distinct regional exits, random selection of at most five unfailed candidates,
-rollback, Telegram confirmation and five-failure intervention alerts.
+networking, distinct regional exits, stable-history selection of at most five unfailed candidates,
+rollback, Telegram confirmation and five-failure intervention alerts. The stable selection
+contract supersedes the earlier random selection and quality optimization behavior; see
+[稳定优先切换实施记录](STABILITY_SELECTION.md).
 
 ## Completion evidence
 

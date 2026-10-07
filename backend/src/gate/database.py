@@ -266,9 +266,12 @@ class TrafficRecord(Base):
 
 class Database:
     def __init__(self, url: str) -> None:
+        from gate.selection import SelectionStore
+
         self.engine: AsyncEngine = create_async_engine(url)
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
         self._runtime_lock = asyncio.Lock()
+        self.history = SelectionStore(self)
         if url.startswith("sqlite"):
             event.listen(self.engine.sync_engine, "connect", self._configure_sqlite)
 
@@ -457,6 +460,8 @@ class Database:
                     else:
                         slot_record.namespace_name = spec.namespace
                         slot_record.backend_address = spec.namespace_ip
+
+        await self.history.migrate()
 
     async def close(self) -> None:
         await self.engine.dispose()
@@ -872,11 +877,6 @@ class Database:
             selection.last_switch_at = utc_now()
             selection.updated_at = utc_now()
             await session.execute(
-                delete(RegionSwitchFailureRecord).where(
-                    RegionSwitchFailureRecord.region_id == region_id
-                )
-            )
-            await session.execute(
                 delete(RegionSwitchFailureStateRecord).where(
                     RegionSwitchFailureStateRecord.region_id == region_id
                 )
@@ -988,7 +988,9 @@ class Database:
             )
             return list(await session.scalars(statement))
 
-    async def set_active_egress_ip(self, region_id: str, egress_ip: str) -> None:
+    async def set_active_egress_ip(
+        self, region_id: str, egress_ip: str, *, allow_duplicate: bool = False
+    ) -> None:
         async with self.sessions() as session, session.begin():
             region = await session.get(RegionRecord, region_id)
             if region is None:
@@ -1010,12 +1012,21 @@ class Database:
                     ),
                 )
             )
-            if sibling_conflict is not None or slot_conflict is not None:
+            if (sibling_conflict is not None or slot_conflict is not None) and not allow_duplicate:
                 raise ValueError(
                     f"active exit conflicts with sibling entry: {sibling_conflict or slot_conflict}"
                 )
             region.active_egress_ip = egress_ip
             region.updated_at = utc_now()
+            slots = await session.scalars(
+                select(RegionSlotRecord).where(
+                    RegionSlotRecord.region_id == region_id,
+                    RegionSlotRecord.state == "active",
+                )
+            )
+            for slot in slots:
+                slot.egress_ip = egress_ip
+                slot.last_verified_at = utc_now()
 
     async def record_probe(
         self,
@@ -1038,13 +1049,24 @@ class Database:
             egress_ip=egress_ip,
             country_code=country_code,
             latency_median_ms=latency_ms,
-            success_rate=1.0 if result == "succeeded" else 0.0,
+            success_rate=(1.0 if result == "succeeded" else 0.0)
+            if result in {"succeeded", "failed"}
+            else None,
             error_code=error_code,
             started_at=started_at or utc_now(),
             finished_at=utc_now(),
         )
         async with self.sessions() as session, session.begin():
             session.add(record)
+        if probe_type in {"active_health", "candidate"}:
+            await self.history.observe(
+                node_id,
+                region_id=region_id,
+                success=(result == "succeeded") if result != "unknown" else None,
+                latency_ms=latency_ms,
+                egress_ip=egress_ip,
+                active=probe_type == "active_health",
+            )
         return record
 
     async def list_active_health_probes(
@@ -1078,6 +1100,7 @@ class Database:
                     select(ProbeRunRecord).where(
                         ProbeRunRecord.region_id == region_id,
                         ProbeRunRecord.node_id == node_id,
+                        ProbeRunRecord.result.in_(("succeeded", "failed")),
                         ProbeRunRecord.finished_at.is_not(None),
                         ProbeRunRecord.finished_at >= cutoff,
                     )

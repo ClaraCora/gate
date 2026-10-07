@@ -77,6 +77,10 @@ export interface Region {
   standby_egress_ip?: string | null;
   conflict_region_name?: string | null;
   conflict_reason?: string | null;
+  active_stability?: string | null;
+  observed_hours?: number | null;
+  last_switch_reason?: string | null;
+  next_retry_at?: string | null;
 }
 
 export interface HealthCheck {
@@ -116,6 +120,12 @@ export interface Candidate {
   measured_latency_ms: number | null;
   measured_throughput_mbps: number | null;
   quality_score: number | null;
+  stability?: string;
+  observed_hours?: number;
+  recent_success_rate?: number | null;
+  wilson_lower_95?: number;
+  failure_cooldown_until?: string | null;
+  exclusion_reasons?: string[];
 }
 
 export interface RuntimeSlot {
@@ -176,6 +186,18 @@ export interface MonitoringPolicy {
   noise_observation_seconds: number;
   noise_confirmation_windows: number;
   noise_switch_cooldown_minutes: number;
+}
+
+export interface SelectionPolicy {
+  stable_observation_hours: number;
+  stable_success_rate: number;
+  max_candidates_per_batch: number;
+  standby_enabled: boolean;
+  standby_pool_size: number;
+  standby_interval_hours: number;
+  standby_timeout_seconds: number;
+  noise_sustained_minutes: number;
+  noise_replacement_hours: number;
 }
 
 export interface TrafficSummary {

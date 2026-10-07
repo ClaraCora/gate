@@ -4,6 +4,7 @@ import asyncio
 import ipaddress
 import json
 import time
+from contextlib import suppress
 from dataclasses import dataclass
 from urllib.parse import quote
 
@@ -21,6 +22,32 @@ class DetectorError(ProbeError):
     """An endpoint did not provide evidence that the tunnel is broken."""
 
     code = "DETECTOR_UNAVAILABLE"
+
+
+class UnconfirmedRouteError(DetectorError):
+    """No destination replied; the host/control path must be checked before attribution."""
+
+
+class RegionMismatchError(ProbeError):
+    code = "REGION_MISMATCH"
+
+
+class SocksTransportError(ProbeError):
+    code = "SOCKS_UNAVAILABLE"
+
+
+async def _check_socks_listener(host: str, port: int, timeout_seconds: float) -> None:
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port), timeout=min(timeout_seconds, 3)
+        )
+    except (OSError, TimeoutError) as exc:
+        raise SocksTransportError("SOCKS listener is not accepting connections") from exc
+    else:
+        del reader
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,11 +93,14 @@ async def probe_socks_exit(
     full: bool = True,
     previous_ip: str | None = None,
     secondary_first: bool = False,
+    provider_offset: int = 0,
     client: httpx.AsyncClient | None = None,
 ) -> EgressProbe:
     proxy = socks_proxy_url(host, port, username=username, password=password)
     started = time.perf_counter()
     owns_client = client is None
+    if owns_client:
+        await _check_socks_listener(host, port, timeout_seconds)
     http_client = client or httpx.AsyncClient(
         proxy=proxy,
         timeout=httpx.Timeout(timeout_seconds, connect=timeout_seconds),
@@ -82,6 +112,9 @@ async def probe_socks_exit(
     endpoints = ["cloudflare", "ipify", "ipwho", "ifconfig", "icanhaz", "checkip"]
     if secondary_first:
         endpoints[:2] = ["ipify", "cloudflare"]
+    if provider_offset:
+        offset = provider_offset % len(endpoints)
+        endpoints = endpoints[offset:] + endpoints[:offset]
     urls = {
         "cloudflare": "https://www.cloudflare.com/cdn-cgi/trace",
         "ipify": "https://api.ipify.org?format=json",
@@ -92,6 +125,7 @@ async def probe_socks_exit(
     }
     answers: list[tuple[str, str]] = []
     detector_failed = False
+    proxy_failures = 0
     try:
         async with asyncio.timeout(timeout_seconds):
             for endpoint in endpoints:
@@ -116,15 +150,20 @@ async def probe_socks_exit(
                 except (httpx.HTTPStatusError, ValueError, KeyError, TypeError):
                     detector_failed = True
                     continue
+                except httpx.ProxyError:
+                    proxy_failures += 1
+                    continue
                 except (httpx.HTTPError, OSError, TimeoutError):
                     continue
-                if country and country not in expected_countries:
-                    raise ProbeError(f"egress country {country} is outside the region")
                 answers.append((ip, country))
                 # An unchanged address can be checked cheaply. A changed address
                 # always requires two independent providers plus country evidence.
                 needs_full = full or (previous_ip is not None and ip != previous_ip)
-                if not needs_full and (country or ip == previous_ip):
+                if (
+                    not needs_full
+                    and (country or ip == previous_ip)
+                    and (not country or country in expected_countries)
+                ):
                     return EgressProbe(
                         ip, country, round((time.perf_counter() - started) * 1000, 2)
                     )
@@ -132,17 +171,34 @@ async def probe_socks_exit(
                     if len({answer[0] for answer in answers}) != 1:
                         raise DetectorError("egress providers disagree; keep current route")
                     verified_country = next((c for _, c in answers if c), "")
+                    countries = [c for _, c in answers if c]
+                    if len(set(countries)) > 1:
+                        raise DetectorError("country providers disagree; keep current route")
+                    if verified_country and verified_country not in expected_countries:
+                        if len(countries) >= 2:
+                            raise RegionMismatchError("independent providers confirm wrong region")
+                        continue  # One country's opinion is insufficient to condemn a node.
                     if verified_country:
                         return EgressProbe(
                             ip, verified_country, round((time.perf_counter() - started) * 1000, 2)
                         )
     except TimeoutError as exc:
-        if answers:
+        if answers or detector_failed:
             raise DetectorError("verification incomplete; HTTPS tunnel responded") from exc
-        raise ProbeError("SOCKS HTTPS deadline exceeded") from exc
+        if proxy_failures >= 2:
+            raise ProbeError(
+                "multiple independent destinations failed through the SOCKS relay"
+            ) from exc
+        raise UnconfirmedRouteError(
+            "verification timed out without evidence that the route is broken"
+        ) from exc
     finally:
         if owns_client:
             await http_client.aclose()
     if answers or detector_failed:
         raise DetectorError("verification providers unavailable; keep current route")
-    raise ProbeError("independent HTTPS providers could not be reached through SOCKS")
+    if proxy_failures >= 2:
+        raise ProbeError("multiple independent destinations failed through the SOCKS relay")
+    raise UnconfirmedRouteError(
+        "independent detector requests failed without confirming a SOCKS failure"
+    )

@@ -14,7 +14,7 @@ v0.1 MVP 已实现并部署到真实 VPS，已完成生产链路、断线阻断�
 - VPN Gate CSV 容错解析、候选粗筛和定时发现
 - OpenVPN 配置严格净化、PEM 与证书/私钥匹配校验
 - Linux network namespace、nftables kill switch、sing-box 和 HAProxy A/B 数据面
-- 基于 VPS 实测的候选探测、评分、15% 迟滞、连续确认和 30 分钟冷却
+- 基于 7 天实测履历的稳定优先选线、故障确认、失败冷却和有序恢复
 - 手动测试、验证后切换、重连、锁定、停用、任务取消和启动 reconcile
 - WebUI 全局暂停自动发现、健康检查和线路优化，设置重启后保留
 - FastAPI、SQLite、持久任务、事件历史、SSE 和数据保留

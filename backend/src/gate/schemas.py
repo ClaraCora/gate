@@ -97,6 +97,10 @@ class RegionResponse(BaseModel):
     standby_egress_ip: str | None = None
     conflict_region_name: str | None = None
     conflict_reason: str | None = None
+    active_stability: str | None = None
+    observed_hours: float | None = None
+    last_switch_reason: str | None = None
+    next_retry_at: datetime | None = None
 
 
 class RegionModeRequest(BaseModel):
@@ -151,6 +155,12 @@ class CandidateResponse(BaseModel):
     measured_latency_ms: float | None = None
     measured_throughput_mbps: float | None = None
     quality_score: float | None = None
+    stability: str | None = None
+    observed_hours: float | None = None
+    recent_success_rate: float | None = None
+    wilson_lower_95: float | None = None
+    failure_cooldown_until: datetime | None = None
+    exclusion_reasons: list[str] = Field(default_factory=list)
 
 
 class DiscoveryResponse(BaseModel):

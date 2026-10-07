@@ -280,6 +280,31 @@ async def test_manual_switch_api_queues_selection_job(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_selection_policy_persists_and_explanation_is_read_only(tmp_path: Path) -> None:
+    app = create_app(
+        _settings(tmp_path / "selection-policy.db"),
+        reconcile_on_startup=False,
+        automation_on_startup=False,
+    )
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            policy_response = await client.get("/api/v1/selection-policy")
+            policy = policy_response.json()
+            policy["stable_observation_hours"] = 48
+            updated = await client.put(
+                "/api/v1/selection-policy", headers=MUTATION_HEADERS, json=policy
+            )
+            explanation = await client.get("/api/v1/regions/jp/selection")
+            persisted = await client.get("/api/v1/selection-policy")
+
+    assert updated.status_code == 200
+    assert explanation.status_code == 200
+    assert explanation.json()["recommended"] == []
+    assert persisted.json()["stable_observation_hours"] == 48
+
+
+@pytest.mark.asyncio
 async def test_telegram_status_provider_lists_exit_ip_success_rate_and_switch_buttons(
     tmp_path: Path,
 ) -> None:
@@ -298,6 +323,7 @@ async def test_telegram_status_provider_lists_exit_ip_success_rate_and_switch_bu
     assert empty_message.endswith("暂无已分配的出口")
     assert "日本 01" not in empty_message
     assert "日本 01 - 203.0.113.10 - 成功率 0/0" in message
+    assert "观察 0.0 小时" in message
     assert "未分配" not in message
     assert "韩国 01" not in message
     assert "日本 02" not in message
@@ -703,7 +729,8 @@ async def test_sibling_entries_exclude_active_node_and_reject_duplicate_egress(
 
             assert [item["id"] for item in sibling] == [japan[1]["id"]]
             await database.reserve_slot("jp-02", "a", japan[1]["id"])
-            assert (await client.get("/api/v1/regions/jp/candidates")).json() == [japan[0]]
+            remaining = (await client.get("/api/v1/regions/jp/candidates")).json()
+            assert [item["id"] for item in remaining] == [japan[0]["id"]]
             region_rows = (await client.get("/api/v1/regions")).json()
             standby = next(item for item in region_rows if item["id"] == "jp-02")
             assert standby["standby_state"] == "switching"

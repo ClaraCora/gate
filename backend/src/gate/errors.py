@@ -4,6 +4,7 @@
 class GateError(Exception):
     """Base error carrying a stable machine-readable code."""
 
+    selection_incident: str | None = None
     code = "GATE_ERROR"
 
 

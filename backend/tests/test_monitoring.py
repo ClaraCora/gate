@@ -6,10 +6,22 @@ from pathlib import Path
 
 import httpx
 import pytest
+from gate import monitoring as monitoring_module
 from gate.config import load_settings
 from gate.database import Database, utc_now
+from gate.errors import GateError
 from gate.http_usage import bounded_get, usage_recorder
-from gate.probes import DetectorError, ProbeError, probe_socks_exit
+from gate.monitoring import MonitoringService
+from gate.network import TunnelConnectError
+from gate.probes import (
+    DetectorError,
+    EgressProbe,
+    ProbeError,
+    UnconfirmedRouteError,
+    probe_socks_exit,
+)
+from gate.selection import failure_category
+from gate.worker_protocol import Request
 
 
 @pytest.mark.asyncio
@@ -100,7 +112,7 @@ async def test_independent_fallback_reaches_plain_ip_provider() -> None:
 
 
 @pytest.mark.asyncio
-async def test_detector_fault_is_distinct_from_unreachable_tunnel() -> None:
+async def test_failed_detector_requests_are_unknown_until_tunnel_failure_is_confirmed() -> None:
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(lambda _: httpx.Response(503))
     ) as client:
@@ -113,7 +125,19 @@ async def test_detector_fault_is_distinct_from_unreachable_tunnel() -> None:
     async with httpx.AsyncClient(transport=httpx.MockTransport(unavailable)) as client:
         with pytest.raises(ProbeError) as failure:
             await probe_socks_exit("127.0.0.1", 1, expected_countries={"JP"}, client=client)
-        assert not isinstance(failure.value, DetectorError)
+        assert isinstance(failure.value, DetectorError)
+
+
+@pytest.mark.asyncio
+async def test_multiple_socks_relay_failures_confirm_route_failure() -> None:
+    def relay_unavailable(request: httpx.Request) -> httpx.Response:
+        raise httpx.ProxyError("SOCKS relay rejected the connection", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(relay_unavailable)) as client:
+        with pytest.raises(ProbeError) as failure:
+            await probe_socks_exit("127.0.0.1", 1, expected_countries={"JP"}, client=client)
+
+    assert not isinstance(failure.value, DetectorError)
 
 
 @pytest.mark.asyncio
@@ -183,3 +207,109 @@ async def test_probe_has_an_overall_deadline() -> None:
                 await probe_socks_exit(
                     "127.0.0.1", 1, expected_countries={"JP"}, timeout_seconds=0.06, client=client
                 )
+
+
+class InspectWorker:
+    def __init__(self, *, available: bool = True, socks_active: bool = True) -> None:
+        self.available = available
+        self.socks_active = socks_active
+        self.calls = 0
+
+    async def request(self, request: Request) -> dict[str, object]:
+        self.calls += 1
+        if not self.available:
+            raise GateError("worker restarting")
+        return {
+            "slots": [
+                {
+                    "region_id": "jp",
+                    "slot": "a",
+                    "namespace_ip": "10.253.0.2",
+                    "exists": True,
+                    "socks_active": self.socks_active,
+                }
+            ]
+        }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("worker_up", "socks_up", "host_up", "category"),
+    [
+        (False, True, True, "detector"),
+        (True, False, True, "detector"),
+        (True, True, False, "detector"),
+        (True, True, True, "node"),
+    ],
+)
+async def test_timeout_requires_local_and_host_controls_before_node_penalty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    worker_up: bool,
+    socks_up: bool,
+    host_up: bool,
+    category: str,
+) -> None:
+    settings = load_settings()
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'controls.db'}")
+    await database.initialize(settings.regions)
+    monitor = MonitoringService(
+        settings,
+        database,
+        InspectWorker(
+            available=worker_up,
+            socks_active=socks_up,
+        ),
+    )
+
+    async def timeout(*args: object, **kwargs: object) -> EgressProbe:
+        raise UnconfirmedRouteError("no destination responded")
+
+    async def controls() -> bool:
+        return host_up
+
+    monkeypatch.setattr(monitoring_module, "probe_socks_exit", timeout)
+    monkeypatch.setattr(monitor, "_host_controls_available", controls)
+    with pytest.raises(ProbeError) as failure:
+        await monitor.probe("10.253.0.2", 1080, expected_countries={"JP"})
+    assert failure_category(failure.value) == category
+    assert monitor._running_probes == 0
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_detector_response_does_not_start_control_requests(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = load_settings()
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'detector.db'}")
+    await database.initialize(settings.regions)
+    worker = InspectWorker()
+    monitor = MonitoringService(settings, database, worker)
+
+    async def invalid_response(*args: object, **kwargs: object) -> EgressProbe:
+        raise DetectorError("country providers disagree")
+
+    monkeypatch.setattr(monitoring_module, "probe_socks_exit", invalid_response)
+    with pytest.raises(DetectorError):
+        await monitor.probe("10.253.0.2", 1080, expected_countries={"JP"})
+    assert worker.calls == 0
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_candidate_connection_failure_is_unknown_when_host_control_is_down(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'connection.db'}")
+    monitor = MonitoringService(load_settings(), database, InspectWorker())
+
+    async def controls() -> bool:
+        return False
+
+    monkeypatch.setattr(monitor, "_host_controls_available", controls)
+    failure = await monitor.validate_connection_failure(TunnelConnectError("connect timeout"))
+    assert failure_category(failure) == "detector"
+    await database.close()

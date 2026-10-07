@@ -19,6 +19,7 @@ from gate import __version__
 from gate.config import (
     GateSettings,
     MonitoringPolicy,
+    SelectionPolicy,
     SocksAuthConfig,
     TelegramConfig,
     load_settings,
@@ -107,6 +108,7 @@ def create_app(
         app_coordinator.set_socks_auth(app_settings.socks_auth)
         if coordinator is None:
             app_coordinator.noise_guard = app_monitoring.observe_candidate
+            app_coordinator.failure_guard = app_monitoring.validate_connection_failure
     app_worker_health = worker_health or WorkerClient(timeout_seconds=1.0)
     app_telegram = TelegramNotifier(app_settings.telegram)
     app_telegram_bot = TelegramBot(app_telegram)
@@ -146,6 +148,9 @@ def create_app(
         stored_policy = await app_database.get_runtime_state("monitoring_policy")
         if stored_policy:
             app_settings.monitoring = MonitoringPolicy.model_validate(stored_policy)
+        stored_selection_policy = await app_database.get_runtime_state("selection_policy")
+        if stored_selection_policy:
+            app_settings.selection_policy = SelectionPolicy.model_validate(stored_selection_policy)
         await app_discovery.load_cache()
         stored_credentials = await app_database.get_security_credentials()
         if stored_credentials is not None:
@@ -308,6 +313,10 @@ def create_app(
                 detail={"message": "线路切换发生意外错误", "node_id": node_id},
             )
         else:
+            await app_database.set_runtime_state(
+                f"switch_reason:{region_id}",
+                {"reason": "manual", "at": utc_now().isoformat()},
+            )
             await app_database.update_job(
                 job_id,
                 status=JobStatus.SUCCEEDED,
@@ -463,8 +472,11 @@ def create_app(
             now - timedelta(hours=2),
             now,
         )
+        evidence_by_node = await app_database.history.snapshot(app_settings.selection_policy)
         totals: dict[str, tuple[int, int]] = {}
         for check in checks:
+            if check.result not in {"succeeded", "failed"}:
+                continue
             succeeded, total = totals.get(check.region_id, (0, 0))
             totals[check.region_id] = (
                 succeeded + (1 if check.result == "succeeded" else 0),
@@ -475,9 +487,32 @@ def create_app(
         for region, _candidate_count in await app_database.list_regions():
             if region.active_egress_ip:
                 succeeded, total = totals.get(region.id, (0, 0))
+                evidence = evidence_by_node.get(region.active_node_id or -1)
+                stability = {
+                    "stable": "稳定",
+                    "verified": "已验证",
+                    "unverified": "未验证",
+                }.get(evidence.tier if evidence else "", "积累中")
+                observed_hours = evidence.observed_seconds / 3600 if evidence else 0
                 lines.append(
                     f"• {region.name} - {region.active_egress_ip} - 成功率 {succeeded}/{total}"
+                    f" - {stability}, 观察 {observed_hours:.1f} 小时"
                 )
+                switch_state = await app_database.get_runtime_state(f"switch_reason:{region.id}")
+                reason_key = switch_state.get("reason")
+                reason = {
+                    "confirmed_failure_recovery": "故障恢复",
+                    "sustained_noise_reduction": "噪声优化",
+                    "manual": "手动切换",
+                }.get(reason_key if isinstance(reason_key, str) else "", "")
+                recovery = await app_database.get_runtime_state(f"recovery:{region.id}")
+                retry_at = recovery.get("next_retry", 0)
+                details = [f"最近切换: {reason}"] if reason else []
+                if retry_at > now.timestamp():
+                    retry_time = datetime.fromtimestamp(retry_at, UTC).strftime("%m-%d %H:%M UTC")
+                    details.append(f"下次恢复: {retry_time}")
+                if details:
+                    lines.append(f"  ↳ {' · '.join(details)}")
             if region.enabled and region.mode != "disabled":
                 buttons.append(
                     {"text": f"🔀 切换 {region.name}", "callback_data": f"switch:{region.id}"}
@@ -624,6 +659,19 @@ def create_app(
         )
         await app_database.add_event(
             code="MONITORING_POLICY_UPDATED", message="检测与流量策略已更新"
+        )
+        return payload
+
+    @app.get("/api/v1/selection-policy", response_model=SelectionPolicy)
+    async def get_selection_policy() -> SelectionPolicy:
+        return app_settings.selection_policy
+
+    @app.put("/api/v1/selection-policy", response_model=SelectionPolicy)
+    async def update_selection_policy(payload: SelectionPolicy) -> SelectionPolicy:
+        await app_database.set_runtime_state("selection_policy", payload.model_dump())
+        app_settings.selection_policy = payload
+        await app_database.add_event(
+            code="SELECTION_POLICY_UPDATED", message="稳定优先切换策略已更新"
         )
         return payload
 
@@ -853,6 +901,7 @@ def create_app(
     async def list_regions() -> list[RegionResponse]:
         records = await app_database.list_regions()
         result: list[RegionResponse] = []
+        evidence_by_node = await app_database.history.snapshot(app_settings.selection_policy)
         for region, candidate_count in records:
             standby = await app_database.get_switching_slot(region.id)
             conflict = await app_database.get_region_conflict(region.id)
@@ -861,6 +910,8 @@ def create_app(
                 if region.active_node_id is not None
                 else None
             )
+            active_evidence = evidence_by_node.get(region.active_node_id or -1)
+            retry = await app_database.get_runtime_state(f"recovery:{region.id}")
             result.append(
                 RegionResponse(
                     id=region.id,
@@ -886,9 +937,58 @@ def create_app(
                     standby_egress_ip=standby.egress_ip if standby is not None else None,
                     conflict_region_name=conflict[0].name if conflict is not None else None,
                     conflict_reason=conflict[1] if conflict is not None else None,
+                    active_stability=active_evidence.tier if active_evidence else None,
+                    observed_hours=(active_evidence.observed_seconds / 3600)
+                    if active_evidence
+                    else None,
+                    last_switch_reason=(
+                        (await app_database.get_runtime_state(f"switch_reason:{region.id}")).get(
+                            "reason"
+                        )
+                    ),
+                    next_retry_at=(
+                        datetime.fromtimestamp(retry["next_retry"], UTC)
+                        if retry.get("next_retry")
+                        else None
+                    ),
                 )
             )
         return result
+
+    @app.get("/api/v1/regions/{region_id}/selection")
+    async def selection_explanation(region_id: str) -> dict[str, Any]:
+        region = await app_database.get_region(region_id)
+        if region is None:
+            raise HTTPException(status_code=404, detail="Region not found")
+        entries = await app_database.history.explain(
+            region_id, app_settings.selection_policy, set(app_discovery.profiles)
+        )
+        eligible = [entry for entry in entries if not entry.excluded]
+        standby = await app_database.history.standby(region.group_id)
+        return {
+            "region_id": region_id,
+            "generated_at": utc_now(),
+            "current_node_id": region.active_node_id,
+            "selection_reason": (
+                "当前线路健康, 稳定优先策略不会主动切回或按分数优化"
+                if region.status == "healthy"
+                else "按节点履历排序, 并在全部排除条件后最多尝试 5 个"
+            ),
+            "recommended": [
+                entry.response()
+                for entry in eligible[: app_settings.selection_policy.max_candidates_per_batch]
+            ],
+            "candidates": [entry.response() for entry in entries],
+            "standby": [
+                {
+                    "node_id": record.node_id,
+                    "egress_ip": record.egress_ip,
+                    "validated_at": record.validated_at,
+                    "needs_revalidation": utc_now().timestamp() - record.validated_at > 86400,
+                }
+                for record in standby
+            ],
+        }
 
     @app.get("/api/v1/health-history", response_model=HealthHistoryResponse)
     async def health_history(
@@ -931,7 +1031,15 @@ def create_app(
         region = await app_database.get_region(region_id)
         if region is None:
             raise HTTPException(status_code=404, detail="Region not found")
-        records = await app_database.list_candidates(region_id, limit)
+        selection = await app_database.history.explain(
+            region_id,
+            app_settings.selection_policy,
+            set(app_discovery.profiles),
+            ignore_round=False,
+        )
+        eligible = [entry for entry in selection if not entry.excluded]
+        records = [entry.node for entry in eligible[:limit]]
+        by_node = {entry.node.id: entry for entry in selection}
         if region.active_node_id is not None:
             active_index = next(
                 (index for index, node in enumerate(records) if node.id == region.active_node_id),
@@ -946,6 +1054,7 @@ def create_app(
             records = records[:limit]
         result: list[CandidateResponse] = []
         for node in records:
+            entry = by_node.get(node.id)
             metrics = await app_database.get_probe_metrics(region_id, node.id)
             quality = calculate_quality(metrics) if metrics is not None else None
             result.append(
@@ -977,6 +1086,22 @@ def create_app(
                         else None
                     ),
                     quality_score=quality.total if quality is not None else None,
+                    stability=entry.evidence.tier if entry is not None else None,
+                    observed_hours=(
+                        entry.evidence.observed_seconds / 3600 if entry is not None else None
+                    ),
+                    recent_success_rate=(
+                        entry.evidence.successes / entry.evidence.samples
+                        if entry is not None and entry.evidence.samples
+                        else None
+                    ),
+                    wilson_lower_95=entry.evidence.wilson_lower if entry is not None else None,
+                    failure_cooldown_until=(
+                        datetime.fromtimestamp(entry.evidence.cooldown_until, UTC)
+                        if entry is not None and entry.evidence.cooldown_until
+                        else None
+                    ),
+                    exclusion_reasons=entry.excluded if entry is not None else [],
                 )
             )
         return result
@@ -1064,6 +1189,15 @@ def create_app(
             raise HTTPException(
                 status_code=409,
                 detail="Candidate profile is not cached; refresh discovery and retry",
+            )
+        selection = await app_database.history.explain(
+            region_id, app_settings.selection_policy, set(app_discovery.profiles)
+        )
+        entry = next((candidate for candidate in selection if candidate.node.id == node_id), None)
+        if entry is None or entry.excluded:
+            reasons = entry.excluded if entry is not None else ["candidate_not_eligible"]
+            raise HTTPException(
+                status_code=409, detail={"code": "CANDIDATE_EXCLUDED", "reasons": reasons}
             )
         job = await app_database.create_job(kind="switch", region_id=region_id)
         schedule_job(job.id, run_switch_job(job.id, region_id, node_id))

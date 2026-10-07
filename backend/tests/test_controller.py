@@ -24,7 +24,9 @@ class FakeCoordinator:
     async def switch(self, region_id: str, node_id: int) -> object:
         self.switches.append((region_id, node_id))
         if node_id in self.failing_nodes:
-            raise SwitchError("simulated switch failure")
+            failure = SwitchError("simulated node connection failure")
+            failure.code = "TUNNEL_CONNECT_FAILED"
+            raise failure
         return object()
 
     async def probe_candidate(self, region_id: str, node_id: int) -> object:
@@ -92,6 +94,9 @@ async def test_failover_prefers_untried_candidates_before_resetting_failures(
             "automation": load_settings().automation.model_copy(
                 update={"max_candidates_per_cycle": 1}
             ),
+            "selection_policy": load_settings().selection_policy.model_copy(
+                update={"max_candidates_per_batch": 1}
+            ),
         }
     )
     database = Database(settings.database.url)
@@ -150,21 +155,25 @@ async def test_failover_prefers_untried_candidates_before_resetting_failures(
     assert len(coordinator.switches) == 2
     second_attempt = coordinator.switches[1][1]
     assert second_attempt in {first_id, second_id} - {first_attempt}
-    assert await database.list_switch_failure_nodes("jp") == set()
+    assert await database.list_switch_failure_nodes("jp") == {first_id, second_id}
 
     await controller._attempt_region(region)
-    assert len(coordinator.switches) == 3
-    assert coordinator.switches[2][1] in {first_id, second_id}
-
+    assert len(coordinator.switches) == 2
+    assert notifier.messages == []
+    await controller._record_automatic_switch_failure(
+        region, first_id, SwitchError("confirmed candidate failure")
+    )
     for _ in range(3):
-        await controller._attempt_region(region)
+        failure = SwitchError("confirmed candidate failure")
+        failure.code = "TUNNEL_CONNECT_FAILED"
+        await controller._record_automatic_switch_failure(region, first_id, failure)
     assert len(notifier.messages) == 1
     assert "连续自动切换失败: 5 次" in notifier.messages[0]
     await database.close()
 
 
 @pytest.mark.asyncio
-async def test_optimization_requires_two_measured_improvement_rounds(
+async def test_legacy_optimization_does_not_switch_a_healthy_route(
     tmp_path: Path, encoded_profile: str
 ) -> None:
     settings = load_settings().model_copy(
@@ -246,7 +255,10 @@ async def test_optimization_requires_two_measured_improvement_rounds(
     await controller.run_optimization_cycle()
     assert coordinator.switches == []
     await controller.run_optimization_cycle()
-    assert coordinator.switches == [("jp", candidate.id)]
+    assert coordinator.switches == []
+    assert any(
+        event.code == "LEGACY_OPTIMIZATION_IGNORED" for event in await database.list_events()
+    )
     await database.close()
 
 

@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
-from gate.database import Database
+from sqlalchemy import select
+
+from gate.database import Database, NodeRecord, utc_now
 from gate.domain import FeedParseResult, SanitizedProfile, Transport
 from gate.errors import ProfileRejectedError
 from gate.http_usage import usage_recorder
@@ -126,11 +128,21 @@ class DiscoveryService:
             observed_at=observed_at,
             source_url=self.last_source_url,
         )
-        self.profiles = profiles
+        retained = dict(self.profiles)
+        retained.update(profiles)
+        cutoff = utc_now() - timedelta(days=30)
+        async with self.database.sessions() as session:
+            recent_fingerprints = set(
+                await session.scalars(
+                    select(NodeRecord.fingerprint).where(NodeRecord.last_seen_at >= cutoff)
+                )
+            )
+        retained = {key: profile for key, profile in retained.items() if key in recent_fingerprints}
+        self.profiles = retained
         await self.database.set_runtime_state(
             "discovery_cache",
             {
-                "profiles": [asdict(profile) for profile in profiles.values()],
+                "profiles": [asdict(profile) for profile in retained.values()],
                 "summary": dict(asdict(summary), observed_at=observed_at.isoformat()),
             },
         )
