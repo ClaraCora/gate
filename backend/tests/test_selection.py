@@ -243,8 +243,11 @@ async def test_restart_does_not_infer_unobserved_uptime(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("automatic", [True, False])
 async def test_recovery_attempts_five_distinct_candidates_then_keeps_cooldowns(
-    tmp_path: Path, encoded_profile: str
+    tmp_path: Path,
+    encoded_profile: str,
+    automatic: bool,
 ) -> None:
     settings, database, discovery, nodes = await setup_nodes(
         tmp_path / "batches.db", encoded_profile, 7
@@ -259,18 +262,32 @@ async def test_recovery_attempts_five_distinct_candidates_then_keeps_cooldowns(
         async def probe_candidate(self, region_id: str, node_id: int) -> object:
             raise AssertionError("recovery must not start separate background validation")
 
-    controller = AutomationController(settings, database, discovery, FailedGateway())
+    class Notifier:
+        def __init__(self) -> None:
+            self.messages: list[str] = []
+
+        async def send(self, message: str) -> bool:
+            self.messages.append(message)
+            return True
+
+    notifier = Notifier()
+    controller = AutomationController(
+        settings, database, discovery, FailedGateway(), notifier=notifier
+    )
     region = await database.get_region("jp")
     assert region is not None
     before = datetime.now(UTC).timestamp()
-    assert not await controller._attempt_region(region)
+    assert not await controller._attempt_region(region, automatic=automatic)
     assert attempts == [node.id for node in nodes[:5]]
     retry = await database.get_runtime_state("recovery:jp")
     assert retry["next_retry"] >= before + 60
-    assert not await controller._attempt_region(region)
+    assert len(notifier.messages) == 1
+    assert "切换失败: 5 次" in notifier.messages[0]
+    assert not await controller._attempt_region(region, automatic=automatic)
     assert attempts == [node.id for node in nodes]
-    assert not await controller._attempt_region(region)
+    assert not await controller._attempt_region(region, automatic=automatic)
     assert len(attempts) == 7
+    assert len(notifier.messages) == 1
     assert len((await database.get_runtime_state("selection_round:jp"))["failed_endpoints"]) == 7
     await database.close()
 

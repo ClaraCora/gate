@@ -136,6 +136,7 @@ class AutomationController:
         node_id: int,
         exc: Exception,
         *,
+        automatic: bool = True,
         event_code: str = "AUTO_CANDIDATE_FAILED",
         event_message: str | None = None,
     ) -> None:
@@ -173,7 +174,7 @@ class AutomationController:
         message = (
             "Gate 需要人工干预\n"
             f"入口: {region.name} ({region.id})\n"
-            f"连续自动切换失败: {failure_streak} 次\n"
+            f"连续{'自动' if automatic else ''}切换失败: {failure_streak} 次\n"
             f"当前节点 ID: {region.active_node_id or '--'}\n"
             f"当前实际出口: {region.active_egress_ip or '--'}\n"
             "请检查 VPN 隧道、出口探测和候选线路。"
@@ -334,19 +335,14 @@ class AutomationController:
                 failed_endpoints.add(endpoint(node))
                 round_state.update(failed_endpoints=sorted(failed_endpoints))
                 await self.database.set_runtime_state(f"selection_round:{region.id}", round_state)
-                if automatic:
-                    await self._record_automatic_switch_failure(region, node.id, exc)
-                else:
-                    await self.database.history.fail(
-                        node.id,
-                        getattr(
-                            exc,
-                            "selection_incident",
-                            None,
-                        )
-                        or f"manual:{region.id}:{node.id}:{utc_now().timestamp()}",
-                    )
-                    await self.database.record_switch_failure(region.id, node.id)
+                await self._record_automatic_switch_failure(
+                    region,
+                    node.id,
+                    exc,
+                    automatic=automatic,
+                    event_code="AUTO_CANDIDATE_FAILED" if automatic else "MANUAL_CANDIDATE_FAILED",
+                    event_message=f"{region.name} 的候选节点切换失败",
+                )
                 continue
             if automatic:
                 self.failure_counts[region.id] = 0

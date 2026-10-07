@@ -69,7 +69,7 @@ def report(database, since, until):
     )]
     return {"since": since, "until": until, "switches_by_reason": dict(reasons),
             "successful_recovery_batches": recovered_attempts, "failed_batches": failed_batches,
-            "candidate_node_failures": sum(row["code"] == "AUTO_CANDIDATE_FAILED" for row in events),
+            "candidate_node_failures": sum(row["code"] in {"AUTO_CANDIDATE_FAILED", "MANUAL_CANDIDATE_FAILED"} for row in events),
             "confirmed_unavailable_observed_seconds": dict(known_unavailable),
             "unclassified_health_gaps_seconds": dict(gaps), "health_outcomes": dict(outcomes),
             "traffic_layers_do_not_sum": traffic,

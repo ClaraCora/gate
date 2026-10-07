@@ -10,7 +10,7 @@ from gate.coordinator import SwitchBusyError, SwitchCoordinator, SwitchError
 from gate.database import Database
 from gate.discovery import DiscoveryService
 from gate.domain import RegionMode, RegionStatus, VpnGateNode
-from gate.probes import EgressProbe
+from gate.probes import EgressProbe, ProbeError
 from gate.profiles import sanitize_openvpn_profile
 from gate.worker_protocol import DestroySlotRequest, InspectRequest, ProvisionSlotRequest, Request
 
@@ -438,4 +438,39 @@ async def test_reconcile_destroys_non_active_runtime_slot(
     assert old_slot is not None and old_slot.state == "empty"
     assert active is not None and active.slot == "b"
     assert DestroySlotRequest(action="destroy_slot", region_id="jp", slot="a") in worker.requests
+    await database.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("runtime_ready", [True, False])
+async def test_startup_keeps_fixed_entry_enabled_until_three_health_confirmations(
+    tmp_path: Path,
+    encoded_profile: str,
+    runtime_ready: bool,
+) -> None:
+    database, discovery, node_id = await _seed(tmp_path, encoded_profile)
+    await database.complete_switch("jp", "a", node_id, "8.8.8.8")
+    worker, haproxy = FakeWorker(), FakeHaProxy()
+    worker.inventory = [
+        {
+            "region_id": "jp",
+            "slot": "a",
+            "exists": True,
+            "tunnel_up": runtime_ready,
+            "openvpn_active": runtime_ready,
+            "socks_active": runtime_ready,
+        }
+    ]
+
+    async def failed_probe(*args: object, **kwargs: object) -> EgressProbe:
+        raise ProbeError("first startup timeout")
+
+    coordinator = SwitchCoordinator(
+        database, discovery, worker=worker, haproxy=haproxy, probe=failed_probe
+    )
+    await coordinator.reconcile()
+    assert ("ready", "jp", "a") in haproxy.commands
+    assert not any(isinstance(r, DestroySlotRequest) and r.slot == "a" for r in worker.requests)
+    active = await database.get_active_slot("jp")
+    assert active is not None and active.slot == "a" and active.node_id == node_id
     await database.close()

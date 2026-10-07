@@ -200,6 +200,7 @@ class SwitchCoordinator:
                     )
                     continue
                 except Exception as exc:
+                    await self.haproxy.ready(record.region_id, record.slot)
                     error_code = (
                         exc.code if isinstance(exc, GateError) else "RECONCILE_PROBE_FAILED"
                     )
@@ -250,6 +251,7 @@ class SwitchCoordinator:
                 )
             else:
                 if record.state == "active":
+                    await self.haproxy.ready(record.region_id, record.slot)
                     await self.database.add_event(
                         code="RECONCILE_ACTIVE_TUNNEL_PENDING",
                         level="warning",
