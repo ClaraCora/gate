@@ -452,7 +452,34 @@ class AutomationController:
 
         async def guarded(region: RegionRecord, index: int) -> None:
             async with semaphore:
-                await self._check_health(region, due_only=due_only, index=index, total=len(regions))
+                try:
+                    await self._check_health(
+                        region, due_only=due_only, index=index, total=len(regions)
+                    )
+                except Exception as exc:
+                    # An unexpected error at one entry must not abort the cycle,
+                    # leave sibling probes running, or prevent overdue recovery.
+                    state = await self.database.get_runtime_state(f"health:{region.id}")
+                    state["next_check"] = utc_now().timestamp() + min(
+                        60, self.settings.monitoring.health_interval_seconds
+                    )
+                    await self.database.set_runtime_state(f"health:{region.id}", state)
+                    active = await self.database.get_active_slot(region.id)
+                    if active is not None and active.node_id is not None:
+                        await self.database.record_probe(
+                            region_id=region.id,
+                            node_id=active.node_id,
+                            probe_type="active_health",
+                            result="unknown",
+                            error_code="HEALTH_CHECK_INTERNAL_ERROR",
+                        )
+                    await self.database.add_event(
+                        code="ACTIVE_HEALTH_INTERNAL_ERROR",
+                        level="error",
+                        region_id=region.id,
+                        message=f"{region.name} 的检测任务异常, 其他入口继续检查和恢复",
+                        details={"error": type(exc).__name__},
+                    )
 
         await asyncio.gather(*(guarded(region, index) for index, region in enumerate(regions)))
 
@@ -503,9 +530,22 @@ class AutomationController:
                 **credentials,
             )
         except GateError as exc:
+            # A switch may finish while any kind of probe is in flight.
+            current = await self.database.get_active_slot(region.id)
+            if current is None or current.node_id != active.node_id or current.slot != active.slot:
+                return
+            completed_at = utc_now().timestamp()
             if failure_category(exc) != "node":
                 # No success/failure sample: this is unknown, not a failed exit.
-                state["next_check"] = now + min(60, policy.health_interval_seconds)
+                await self.database.record_probe(
+                    region_id=region.id,
+                    node_id=active.node_id,
+                    probe_type="active_health",
+                    result="unknown",
+                    error_code=exc.code,
+                    started_at=started_at,
+                )
+                state["next_check"] = completed_at + min(60, policy.health_interval_seconds)
                 state["detector_error"] = str(exc)
                 await self.database.set_runtime_state(key, state)
                 await self.database.add_event(
@@ -515,11 +555,6 @@ class AutomationController:
                     region_id=region.id,
                     details={"error": str(exc)},
                 )
-                return
-            # A manual switch may have completed while this probe was in flight.
-            # Never attribute the old route's failure to the newly active slot.
-            current = await self.database.get_active_slot(region.id)
-            if current is None or current.node_id != active.node_id or current.slot != active.slot:
                 return
             await self.database.record_probe(
                 region_id=region.id,
@@ -534,7 +569,7 @@ class AutomationController:
             state.update(
                 failures=failures,
                 failure_started_at=state.get("failure_started_at", now),
-                next_check=now + policy.failure_confirm_seconds,
+                next_check=completed_at + policy.failure_confirm_seconds,
             )
             await self.database.add_event(
                 code="ACTIVE_HEALTH_CHECK_FAILED",
@@ -544,7 +579,7 @@ class AutomationController:
                 details={"failure_count": failures, "error_code": exc.code},
             )
             if failures >= self.settings.selection.active_failure_threshold:
-                state["next_check"] = now + policy.health_interval_seconds
+                state["next_check"] = completed_at + policy.health_interval_seconds
                 if not state.get("fault_incident_recorded"):
                     await self.database.history.fail(
                         active.node_id,
@@ -582,6 +617,7 @@ class AutomationController:
             current = await self.database.get_active_slot(region.id)
             if current is None or current.node_id != active.node_id or current.slot != active.slot:
                 return
+            completed_at = utc_now().timestamp()
             await self.database.record_probe(
                 region_id=region.id,
                 node_id=active.node_id,
@@ -619,7 +655,7 @@ class AutomationController:
                     failures=0,
                     failure_started_at=now,
                     fault_incident_recorded=False,
-                    next_check=now + policy.health_interval_seconds,
+                    next_check=completed_at + policy.health_interval_seconds,
                     detector_error="duplicate_exit",
                 )
                 await self.database.set_runtime_state(key, state)
@@ -642,7 +678,7 @@ class AutomationController:
                 failures=0,
                 failure_started_at=now,
                 fault_incident_recorded=False,
-                next_check=now + policy.health_interval_seconds,
+                next_check=completed_at + policy.health_interval_seconds,
                 detector_error=None,
             )
             if full or probe.egress_ip != region.active_egress_ip:
@@ -1115,11 +1151,12 @@ class AutomationController:
                 await operation()
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
                 await self.database.add_event(
                     code="AUTOMATION_INTERNAL_ERROR",
                     level="error",
                     message="自动维护周期发生意外错误",
+                    details={"operation": operation.__name__, "error": type(exc).__name__},
                 )
             await asyncio.sleep(interval_seconds)
 

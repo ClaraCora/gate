@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from urllib.parse import quote
 
 import httpx
+from socksio.exceptions import ProtocolError as SocksProtocolError
 
 from gate.errors import GateError
 from gate.http_usage import bounded_get
@@ -150,6 +151,10 @@ async def probe_socks_exit(
                 except (httpx.HTTPStatusError, ValueError, KeyError, TypeError):
                     detector_failed = True
                     continue
+                except SocksProtocolError as exc:
+                    # httpcore does not translate malformed/empty SOCKS replies
+                    # into httpx errors (e.g. a frontend with no eligible backend).
+                    raise SocksTransportError("SOCKS relay returned a malformed reply") from exc
                 except httpx.ProxyError:
                     proxy_failures += 1
                     continue

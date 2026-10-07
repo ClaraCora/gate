@@ -380,6 +380,60 @@ async def test_health_unknown_and_ip_change_keep_current_route(
 
 
 @pytest.mark.asyncio
+async def test_one_health_exception_keeps_sibling_checks_and_recovery_running(
+    tmp_path: Path,
+    encoded_profile: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from gate.domain import RegionStatus
+
+    settings, database, discovery, nodes = await setup_nodes(
+        tmp_path / "isolated.db", encoded_profile
+    )
+    await database.complete_switch("jp", "a", nodes[0].id, "8.8.8.8")
+    await database.complete_switch("kr", "a", nodes[1].id, "8.8.4.4")
+    await database.set_region_status("jp", RegionStatus.UNAVAILABLE)
+    for region_id, node in (("jp", nodes[0]), ("kr", nodes[1])):
+        await database.set_runtime_state(
+            f"health:{region_id}",
+            {"node_id": node.id, "failures": 0, "next_check": 0, "next_full": 0},
+        )
+    calls: list[int] = []
+    recoveries: list[str] = []
+
+    async def probe(host: str, port: int, **kwargs: object) -> EgressProbe:
+        calls.append(port)
+        if port == 11081:
+            raise RuntimeError("unexpected low-level transport error")
+        return EgressProbe("8.8.4.4", "KR", 10)
+
+    controller = AutomationController(settings, database, discovery, probe=probe)
+    monkeypatch.setattr(controller, "_launch_recovery", lambda r: recoveries.append(r.id))
+    monkeypatch.setattr(controller, "_schedule_standby_validation", lambda: None)
+    await controller.run_scheduler_tick()
+    assert calls == [11081, 11082]
+    assert "jp" in recoveries
+    assert "kr" not in recoveries
+    state = await database.get_runtime_state("health:jp")
+    assert state["next_check"] > datetime.now(UTC).timestamp() + 50
+    assert state["failures"] == 0
+    checks = await database.list_active_health_probes(
+        since=datetime.now(UTC).replace(hour=0), until=datetime.now(UTC)
+    )
+    assert {(p.region_id, p.result) for p in checks} == {("jp", "unknown"), ("kr", "succeeded")}
+    evidence = (await database.history.snapshot(settings.selection_policy))[nodes[0].id]
+    assert evidence.samples == 0 and evidence.cooldown_until == 0
+    events = await database.list_events()
+    errors = [e for e in events if e.code == "ACTIVE_HEALTH_INTERNAL_ERROR"]
+    assert len(errors) == 1 and errors[0].details == {"error": "RuntimeError"}
+    # A subsequent scheduler tick must obey the delay instead of hammering the
+    # broken entry every ten seconds or leaving previous probes in flight.
+    await controller.run_scheduler_tick()
+    assert calls == [11081, 11082]
+    await database.close()
+
+
+@pytest.mark.asyncio
 async def test_three_failures_confirm_one_incident_until_route_recovers(
     tmp_path: Path,
     encoded_profile: str,
