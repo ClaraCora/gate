@@ -293,6 +293,72 @@ async def test_recovery_attempts_five_distinct_candidates_then_keeps_cooldowns(
 
 
 @pytest.mark.asyncio
+async def test_noise_rejection_is_shared_with_other_entries_in_the_same_group(
+    tmp_path: Path, encoded_profile: str
+) -> None:
+    settings, database, discovery, nodes = await setup_nodes(
+        tmp_path / "shared.db", encoded_profile
+    )
+    extra = settings.regions[0].model_copy(
+        update={"id": "jp-02", "group_id": "jp", "socks_port": 11101, "network_index": 6}
+    )
+    await database.initialize((*settings.regions, extra))
+    now = datetime.now(UTC).timestamp()
+    await database.set_runtime_state("noise_exclusions:jp", {endpoint(nodes[0]): now + 86400})
+    entries = await database.history.explain(
+        "jp-02", settings.selection_policy, set(discovery.profiles)
+    )
+    rejected = next(e for e in entries if e.node.id == nodes[0].id)
+    assert rejected.excluded == ["noise_cooldown"]
+    assert [e.node.id for e in entries if not e.excluded] == [nodes[1].id, nodes[2].id]
+    assert rejected.evidence.cooldown_until == 0 and rejected.evidence.failures_24h == 0
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_unknown_candidate_is_deferred_across_entries_and_restart_without_penalty(
+    tmp_path: Path, encoded_profile: str
+) -> None:
+    settings, database, discovery, nodes = await setup_nodes(tmp_path / "defer.db", encoded_profile)
+    extra = settings.regions[0].model_copy(
+        update={"id": "jp-02", "group_id": "jp", "socks_port": 11101, "network_index": 6}
+    )
+    await database.initialize((*settings.regions, extra))
+    attempts: list[tuple[str, int]] = []
+
+    class Gateway:
+        async def switch(self, region_id: str, node_id: int) -> object:
+            attempts.append((region_id, node_id))
+            if node_id == nodes[0].id:
+                raise DetectorError("verification incomplete")
+            return object()
+
+        async def probe_candidate(self, region_id: str, node_id: int) -> object:
+            raise AssertionError("recovery should use the unified selector")
+
+    controller = AutomationController(settings, database, discovery, Gateway())
+    assert not await controller.attempt_region("jp", automatic=True)
+    assert attempts == [("jp", nodes[0].id)]
+    assert await database.list_switch_failure_nodes("jp") == set()
+    evidence = (await database.history.snapshot(settings.selection_policy))[nodes[0].id]
+    assert evidence.samples == 0 and evidence.failures_24h == 0 and evidence.cooldown_until == 0
+    await database.close()
+    database = Database(settings.database.url)
+    await database.initialize((*settings.regions, extra))
+    controller = AutomationController(settings, database, discovery, Gateway())
+    assert await controller.attempt_region("jp-02", automatic=True)
+    assert attempts == [("jp", nodes[0].id), ("jp-02", nodes[1].id)]
+    await database.set_runtime_state(
+        "candidate_deferrals:jp", {endpoint(nodes[0]): datetime.now(UTC).timestamp() - 1}
+    )
+    entries = await database.history.explain(
+        "jp", settings.selection_policy, set(discovery.profiles)
+    )
+    assert not next(e for e in entries if e.node.id == nodes[0].id).excluded
+    await database.close()
+
+
+@pytest.mark.asyncio
 async def test_fixed_entry_failure_does_not_penalize_working_slot(
     tmp_path: Path,
     encoded_profile: str,

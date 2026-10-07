@@ -317,6 +317,10 @@ class AutomationController:
                     )
                     continue
                 if category != "node":
+                    if category == "detector":
+                        # Keep failures/alerts untouched, but do not retry the
+                        # same inconclusive endpoint first on every sibling port.
+                        await self.database.history.defer_candidate(region.group_id, node)
                     await self.database.set_runtime_state(
                         f"recovery:{region.id}",
                         {

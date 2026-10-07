@@ -25,6 +25,7 @@ from gate.database import (
     ProbeRunRecord,
     RegionRecord,
     RegionSlotRecord,
+    RuntimeStateRecord,
     utc_now,
 )
 from gate.errors import GateError
@@ -329,6 +330,16 @@ class SelectionStore:
         evidence = await self.snapshot(policy)
         return evidence if node_ids is None else {i: evidence[i] for i in node_ids if i in evidence}
 
+    async def defer_candidate(self, group_id: str, node: NodeRecord) -> None:
+        """Briefly defer incomplete verification without marking a node as failed."""
+        now = utc_now().timestamp()
+        key = f"candidate_deferrals:{group_id}"
+        async with self.lock:
+            state = await self.db.get_runtime_state(key)
+            state = {key: until for key, until in state.items() if until > now}
+            state[endpoint(node)] = now + 300
+            await self.db.set_runtime_state(key, state)
+
     async def standby(self, group_id: str) -> list[StandbyRecord]:
         async with self.db.sessions() as session:
             return list(
@@ -506,6 +517,20 @@ class SelectionStore:
                     )
                 )
             )
+            # Existing per-entry policy exclusions also apply to sibling entries.
+            # A noisy endpoint must not be provisioned again once for each port.
+            noise_records = list(
+                await session.scalars(
+                    select(RuntimeStateRecord).where(
+                        RuntimeStateRecord.key.in_([f"noise_exclusions:{r.id}" for r in siblings])
+                    )
+                )
+            )
+            noise_state: dict[str, float] = {}
+            for record in noise_records:
+                for key, until in record.value.items():
+                    noise_state[key] = max(noise_state.get(key, 0), until)
+            deferred = await self.db.get_runtime_state(f"candidate_deferrals:{region.group_id}")
         occupied_ids = {s.node_id for s in slots if s.node_id is not None}
         occupied_ids.update(r.active_node_id for r in siblings if r.active_node_id is not None)
         occupied = {endpoint(all_nodes[i]) for i in occupied_ids if i in all_nodes}
@@ -513,7 +538,6 @@ class SelectionStore:
         occupied_ips.update(r.active_egress_ip for r in siblings if r.active_egress_ip)
         round_state = await self.db.get_runtime_state(f"selection_round:{region_id}")
         failed = set(round_state.get("failed_endpoints", []))
-        noise_state = await self.db.get_runtime_state(f"noise_exclusions:{region_id}")
         result = []
         for node in nodes:
             e = evidence[node.id]
@@ -530,6 +554,8 @@ class SelectionStore:
                 reasons.append("cooldown")
             if noise_state.get(endpoint(node), 0) > now or noise_state.get(str(node.id), 0) > now:
                 reasons.append("noise_cooldown")
+            if deferred.get(endpoint(node), 0) > now:
+                reasons.append("verification_pending")
             if not ignore_round and endpoint(node) in failed:
                 reasons.append("round_failed")
             if node.fingerprint not in profiles:
